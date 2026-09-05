@@ -185,7 +185,10 @@ MIN_BOX_HEIGHT_RATIO = 0.28
 MIN_BOX_WIDTH_RATIO = 0.18
 MIN_BOX_AREA_RATIO = 0.22
 EDGE_MARGIN_PX = 10
-V_DILATE_RATIO = 0.38
+# 0.45 (was 0.38): bridge the gap from a glyph body to its o/u kudlit dot /
+# virama so they stay ONE contour - otherwise the mark splits off, and a lost
+# mark reads "no" as "na" / "n" as "na".
+V_DILATE_RATIO = 0.45
 H_DILATE_RATIO = 0.20
 V_DILATE_FALLBACK = 45
 H_DILATE_FALLBACK = 12
@@ -410,20 +413,56 @@ def split_all_merged_boxes(boxes, gray, avg_width, score_fn=None):
 
 
 def drop_stray_marks(boxes, avg_height, avg_width):
-    """Remove boxes that are almost certainly diacritics, not base glyphs -
-    the virama "krus" (x) and e/i/o/u kudlit dots. They are far smaller than a
-    real glyph; keeping them adds phantom characters (and sometimes a phantom
-    one-glyph line). Conservative: only drops clear area+size outliers."""
+    """Fold a detached diacritic box (virama "krus", e/i/o/u kudlit dot) back
+    into the base glyph it belongs to instead of dropping it.
+
+    A kudlit / virama sits directly above or below its base, so its x-range
+    overlaps that base's. When the adaptive dilation fails to bridge the gap the
+    mark lands in its own tiny contour - the old behaviour deleted it, which
+    turned "no" into "na" and "n" into "na". Here we union each tiny box into
+    the nearest base box that shares its column; only a mark that overlaps no
+    base box (a genuine free-standing speck) is dropped."""
     if len(boxes) < 4:
         return boxes
+
     areas = sorted(w * h for (_, _, w, h) in boxes)
     median_area = areas[len(areas) // 2]
     small_side = 0.66 * min(avg_width, avg_height)
-    kept = [
-        (x, y, w, h) for (x, y, w, h) in boxes
-        if not (w * h < 0.25 * median_area and min(w, h) < small_side)
-    ]
-    return kept if kept else boxes
+
+    marks, bases = [], []
+    for b in boxes:
+        _, _, w, h = b
+        (marks if (w * h < 0.25 * median_area and min(w, h) < small_side)
+         else bases).append(b)
+
+    if not marks or not bases:
+        return boxes
+
+    def x_overlap(a, b):
+        return max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+
+    def v_gap(m, base):
+        my0, my1, by0, by1 = m[1], m[1] + m[3], base[1], base[1] + base[3]
+        if my1 <= by0:
+            return by0 - my1
+        if my0 >= by1:
+            return my0 - by1
+        return 0
+
+    merged = list(bases)
+    for m in marks:
+        cand = [i for i, base in enumerate(merged)
+                if x_overlap(m, base) >= 0.5 * m[2]
+                and v_gap(m, base) < 1.2 * avg_height]
+        if not cand:
+            continue  # free-standing speck -> drop
+        j = min(cand, key=lambda i: v_gap(m, merged[i]))
+        bx, by, bw, bh = merged[j]
+        nx0, ny0 = min(bx, m[0]), min(by, m[1])
+        nx1, ny1 = max(bx + bw, m[0] + m[2]), max(by + bh, m[1] + m[3])
+        merged[j] = (nx0, ny0, nx1 - nx0, ny1 - ny0)
+
+    return merged
 
 
 def group_into_lines(boxes, avg_height, row_ratio=ROW_GROUPING_RATIO):
