@@ -27,12 +27,11 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
   final ApiService _apiService = ApiService();
   final TextEditingController _textController = TextEditingController();
 
-  // Baybayin rendering, sized up 3x so the glyphs + diacritics are big enough
-  // to read (and screenshot for the Baybayin->Tagalog test flow). The gaps
-  // scale with the glyph so the word/char spacing ratio stays the same.
-  static const double _glyphSize = 66.0;
-  static const double _charGap = 6.0; // spacing between glyphs within a word
-  static const double _wordGap = 90.0; // large, unmistakable gap between words
+  // Compact Baybayin rendering so 5-6 lines fit on screen (for screenshotting
+  // and feeding into the Baybayin->Tagalog test flow).
+  static const double _glyphSize = 22.0;
+  static const double _charGap = 2.0; // spacing between glyphs within a word
+  static const double _wordGap = 30.0; // large, unmistakable gap between words
   static const double _lineHeight = 1.5;
 
   Timer? _debounce;
