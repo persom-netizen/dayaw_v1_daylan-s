@@ -1,26 +1,685 @@
 {
-  "accuracy": 0.047058823529411764,
-  "precision": 0.0033140016570008288,
-  "recall": 0.047058823529411764,
-  "f1_score": 0.006191950464396284,
-  "num_classes": 17,
+  "model": "weighted_svm.pkl (HOG 1764 + spatial 26, spatial weight 8)",
+  "source": "tests/reports/test_predictions.npy vs test_true_labels.npy",
+  "n_test_samples": 5222,
+  "num_classes": 95,
+  "accuracy": 0.9263,
+  "precision": 0.928,
+  "recall": 0.9263,
+  "f1_score": 0.9264,
+  "macro_precision": 0.9279,
+  "macro_recall": 0.9257,
+  "macro_f1": 0.926,
+  "weighted_precision": 0.928,
+  "weighted_recall": 0.9263,
+  "weighted_f1": 0.9264,
   "classes": [
     "A",
-    "BA",
-    "DARA",
-    "EI",
-    "GA",
-    "HA",
-    "KA",
-    "LA",
-    "MA",
-    "NA",
-    "NGA",
-    "OU",
-    "PA",
-    "SA",
-    "TA",
-    "WA",
-    "YA"
-  ]
+    "B",
+    "Ba",
+    "Be",
+    "Bi",
+    "Bo",
+    "Bu",
+    "D",
+    "Da",
+    "De",
+    "Di",
+    "Do",
+    "Du",
+    "E",
+    "G",
+    "Ga",
+    "Ge",
+    "Gi",
+    "Go",
+    "Gu",
+    "H",
+    "Ha",
+    "He",
+    "Hi",
+    "Ho",
+    "Hu",
+    "I",
+    "K",
+    "Ka",
+    "Ke",
+    "Ki",
+    "Ko",
+    "Ku",
+    "L",
+    "La",
+    "Le",
+    "Li",
+    "Lo",
+    "Lu",
+    "M",
+    "Ma",
+    "Me",
+    "Mi",
+    "Mo",
+    "Mu",
+    "N",
+    "Na",
+    "Ne",
+    "Ng",
+    "Nga",
+    "Nge",
+    "Ngi",
+    "Ngo",
+    "Ngu",
+    "Ni",
+    "No",
+    "Nu",
+    "O",
+    "P",
+    "Pa",
+    "Pe",
+    "Pi",
+    "Po",
+    "Pu",
+    "R",
+    "Ra",
+    "Re",
+    "Ri",
+    "Ro",
+    "Ru",
+    "S",
+    "Sa",
+    "Se",
+    "Si",
+    "So",
+    "Su",
+    "T",
+    "Ta",
+    "Te",
+    "Ti",
+    "To",
+    "Tu",
+    "U",
+    "W",
+    "Wa",
+    "We",
+    "Wi",
+    "Wo",
+    "Wu",
+    "Y",
+    "Ya",
+    "Ye",
+    "Yi",
+    "Yo",
+    "Yu"
+  ],
+  "per_class": {
+    "A": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 60
+    },
+    "B": {
+      "precision": 0.9138,
+      "recall": 0.9464,
+      "f1": 0.9298,
+      "support": 56
+    },
+    "Ba": {
+      "precision": 0.9455,
+      "recall": 1.0,
+      "f1": 0.972,
+      "support": 52
+    },
+    "Be": {
+      "precision": 1.0,
+      "recall": 0.9286,
+      "f1": 0.963,
+      "support": 56
+    },
+    "Bi": {
+      "precision": 0.9796,
+      "recall": 1.0,
+      "f1": 0.9897,
+      "support": 48
+    },
+    "Bo": {
+      "precision": 0.9038,
+      "recall": 0.8704,
+      "f1": 0.8868,
+      "support": 54
+    },
+    "Bu": {
+      "precision": 0.9787,
+      "recall": 0.9388,
+      "f1": 0.9583,
+      "support": 49
+    },
+    "D": {
+      "precision": 0.8103,
+      "recall": 0.8545,
+      "f1": 0.8319,
+      "support": 55
+    },
+    "Da": {
+      "precision": 0.9524,
+      "recall": 0.9524,
+      "f1": 0.9524,
+      "support": 63
+    },
+    "De": {
+      "precision": 0.9464,
+      "recall": 0.9138,
+      "f1": 0.9298,
+      "support": 58
+    },
+    "Di": {
+      "precision": 0.9643,
+      "recall": 0.9,
+      "f1": 0.931,
+      "support": 60
+    },
+    "Do": {
+      "precision": 0.8793,
+      "recall": 0.9273,
+      "f1": 0.9027,
+      "support": 55
+    },
+    "Du": {
+      "precision": 0.9556,
+      "recall": 0.8776,
+      "f1": 0.9149,
+      "support": 49
+    },
+    "E": {
+      "precision": 0.8889,
+      "recall": 0.9825,
+      "f1": 0.9333,
+      "support": 57
+    },
+    "G": {
+      "precision": 0.8103,
+      "recall": 0.8704,
+      "f1": 0.8393,
+      "support": 54
+    },
+    "Ga": {
+      "precision": 0.9483,
+      "recall": 0.9649,
+      "f1": 0.9565,
+      "support": 57
+    },
+    "Ge": {
+      "precision": 0.7639,
+      "recall": 0.9322,
+      "f1": 0.8397,
+      "support": 59
+    },
+    "Gi": {
+      "precision": 0.9643,
+      "recall": 0.9474,
+      "f1": 0.9558,
+      "support": 57
+    },
+    "Go": {
+      "precision": 0.8615,
+      "recall": 0.8358,
+      "f1": 0.8485,
+      "support": 67
+    },
+    "Gu": {
+      "precision": 0.9298,
+      "recall": 0.9298,
+      "f1": 0.9298,
+      "support": 57
+    },
+    "H": {
+      "precision": 0.9038,
+      "recall": 0.8704,
+      "f1": 0.8868,
+      "support": 54
+    },
+    "Ha": {
+      "precision": 0.9483,
+      "recall": 0.9649,
+      "f1": 0.9565,
+      "support": 57
+    },
+    "He": {
+      "precision": 1.0,
+      "recall": 0.9828,
+      "f1": 0.9913,
+      "support": 58
+    },
+    "Hi": {
+      "precision": 0.8966,
+      "recall": 0.963,
+      "f1": 0.9286,
+      "support": 54
+    },
+    "Ho": {
+      "precision": 0.8727,
+      "recall": 0.8889,
+      "f1": 0.8807,
+      "support": 54
+    },
+    "Hu": {
+      "precision": 0.8909,
+      "recall": 0.9245,
+      "f1": 0.9074,
+      "support": 53
+    },
+    "I": {
+      "precision": 0.9808,
+      "recall": 0.9107,
+      "f1": 0.9444,
+      "support": 56
+    },
+    "K": {
+      "precision": 0.875,
+      "recall": 0.9423,
+      "f1": 0.9074,
+      "support": 52
+    },
+    "Ka": {
+      "precision": 0.9038,
+      "recall": 0.9792,
+      "f1": 0.94,
+      "support": 48
+    },
+    "Ke": {
+      "precision": 0.8936,
+      "recall": 0.8571,
+      "f1": 0.875,
+      "support": 49
+    },
+    "Ki": {
+      "precision": 0.9434,
+      "recall": 0.9615,
+      "f1": 0.9524,
+      "support": 52
+    },
+    "Ko": {
+      "precision": 0.8393,
+      "recall": 0.8868,
+      "f1": 0.8624,
+      "support": 53
+    },
+    "Ku": {
+      "precision": 0.9583,
+      "recall": 0.8846,
+      "f1": 0.92,
+      "support": 52
+    },
+    "L": {
+      "precision": 0.84,
+      "recall": 0.8571,
+      "f1": 0.8485,
+      "support": 49
+    },
+    "La": {
+      "precision": 0.9492,
+      "recall": 0.9655,
+      "f1": 0.9573,
+      "support": 58
+    },
+    "Le": {
+      "precision": 0.9811,
+      "recall": 0.9286,
+      "f1": 0.9541,
+      "support": 56
+    },
+    "Li": {
+      "precision": 0.9429,
+      "recall": 0.9851,
+      "f1": 0.9635,
+      "support": 67
+    },
+    "Lo": {
+      "precision": 0.8548,
+      "recall": 0.8548,
+      "f1": 0.8548,
+      "support": 62
+    },
+    "Lu": {
+      "precision": 1.0,
+      "recall": 0.9107,
+      "f1": 0.9533,
+      "support": 56
+    },
+    "M": {
+      "precision": 0.9123,
+      "recall": 0.9286,
+      "f1": 0.9204,
+      "support": 56
+    },
+    "Ma": {
+      "precision": 0.9394,
+      "recall": 1.0,
+      "f1": 0.9688,
+      "support": 62
+    },
+    "Me": {
+      "precision": 0.9828,
+      "recall": 0.95,
+      "f1": 0.9661,
+      "support": 60
+    },
+    "Mi": {
+      "precision": 0.9365,
+      "recall": 1.0,
+      "f1": 0.9672,
+      "support": 59
+    },
+    "Mo": {
+      "precision": 0.8868,
+      "recall": 0.8545,
+      "f1": 0.8704,
+      "support": 55
+    },
+    "Mu": {
+      "precision": 0.9808,
+      "recall": 0.9273,
+      "f1": 0.9533,
+      "support": 55
+    },
+    "N": {
+      "precision": 0.8868,
+      "recall": 0.9216,
+      "f1": 0.9038,
+      "support": 51
+    },
+    "Na": {
+      "precision": 0.9649,
+      "recall": 1.0,
+      "f1": 0.9821,
+      "support": 55
+    },
+    "Ne": {
+      "precision": 1.0,
+      "recall": 0.9286,
+      "f1": 0.963,
+      "support": 56
+    },
+    "Ng": {
+      "precision": 0.9333,
+      "recall": 0.8077,
+      "f1": 0.866,
+      "support": 52
+    },
+    "Nga": {
+      "precision": 0.9792,
+      "recall": 0.9038,
+      "f1": 0.94,
+      "support": 52
+    },
+    "Nge": {
+      "precision": 0.9808,
+      "recall": 0.9623,
+      "f1": 0.9714,
+      "support": 53
+    },
+    "Ngi": {
+      "precision": 0.9643,
+      "recall": 0.9818,
+      "f1": 0.973,
+      "support": 55
+    },
+    "Ngo": {
+      "precision": 0.8103,
+      "recall": 0.8545,
+      "f1": 0.8319,
+      "support": 55
+    },
+    "Ngu": {
+      "precision": 0.94,
+      "recall": 0.9592,
+      "f1": 0.9495,
+      "support": 49
+    },
+    "Ni": {
+      "precision": 0.9828,
+      "recall": 0.9828,
+      "f1": 0.9828,
+      "support": 58
+    },
+    "No": {
+      "precision": 0.9273,
+      "recall": 0.8947,
+      "f1": 0.9107,
+      "support": 57
+    },
+    "Nu": {
+      "precision": 1.0,
+      "recall": 0.9808,
+      "f1": 0.9903,
+      "support": 52
+    },
+    "O": {
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0,
+      "support": 56
+    },
+    "P": {
+      "precision": 0.8333,
+      "recall": 0.7895,
+      "f1": 0.8108,
+      "support": 57
+    },
+    "Pa": {
+      "precision": 0.9649,
+      "recall": 0.9322,
+      "f1": 0.9483,
+      "support": 59
+    },
+    "Pe": {
+      "precision": 1.0,
+      "recall": 0.9444,
+      "f1": 0.9714,
+      "support": 54
+    },
+    "Pi": {
+      "precision": 0.9286,
+      "recall": 0.9811,
+      "f1": 0.9541,
+      "support": 53
+    },
+    "Po": {
+      "precision": 0.8448,
+      "recall": 0.8596,
+      "f1": 0.8522,
+      "support": 57
+    },
+    "Pu": {
+      "precision": 0.9615,
+      "recall": 0.9091,
+      "f1": 0.9346,
+      "support": 55
+    },
+    "R": {
+      "precision": 0.8214,
+      "recall": 0.92,
+      "f1": 0.8679,
+      "support": 50
+    },
+    "Ra": {
+      "precision": 0.8906,
+      "recall": 0.9661,
+      "f1": 0.9268,
+      "support": 59
+    },
+    "Re": {
+      "precision": 0.8909,
+      "recall": 0.9074,
+      "f1": 0.8991,
+      "support": 54
+    },
+    "Ri": {
+      "precision": 0.9444,
+      "recall": 0.9107,
+      "f1": 0.9273,
+      "support": 56
+    },
+    "Ro": {
+      "precision": 0.88,
+      "recall": 0.8627,
+      "f1": 0.8713,
+      "support": 51
+    },
+    "Ru": {
+      "precision": 0.9787,
+      "recall": 0.8364,
+      "f1": 0.902,
+      "support": 55
+    },
+    "S": {
+      "precision": 0.8776,
+      "recall": 0.8269,
+      "f1": 0.8515,
+      "support": 52
+    },
+    "Sa": {
+      "precision": 0.9048,
+      "recall": 1.0,
+      "f1": 0.95,
+      "support": 57
+    },
+    "Se": {
+      "precision": 0.9615,
+      "recall": 0.9615,
+      "f1": 0.9615,
+      "support": 52
+    },
+    "Si": {
+      "precision": 1.0,
+      "recall": 0.9483,
+      "f1": 0.9735,
+      "support": 58
+    },
+    "So": {
+      "precision": 0.902,
+      "recall": 0.8679,
+      "f1": 0.8846,
+      "support": 53
+    },
+    "Su": {
+      "precision": 0.9,
+      "recall": 0.9643,
+      "f1": 0.931,
+      "support": 56
+    },
+    "T": {
+      "precision": 0.8889,
+      "recall": 0.8,
+      "f1": 0.8421,
+      "support": 50
+    },
+    "Ta": {
+      "precision": 0.9643,
+      "recall": 0.9643,
+      "f1": 0.9643,
+      "support": 56
+    },
+    "Te": {
+      "precision": 0.9434,
+      "recall": 0.9091,
+      "f1": 0.9259,
+      "support": 55
+    },
+    "Ti": {
+      "precision": 0.9107,
+      "recall": 0.9107,
+      "f1": 0.9107,
+      "support": 56
+    },
+    "To": {
+      "precision": 0.8305,
+      "recall": 0.9245,
+      "f1": 0.875,
+      "support": 53
+    },
+    "Tu": {
+      "precision": 0.9592,
+      "recall": 0.8868,
+      "f1": 0.9216,
+      "support": 53
+    },
+    "U": {
+      "precision": 0.9623,
+      "recall": 0.9623,
+      "f1": 0.9623,
+      "support": 53
+    },
+    "W": {
+      "precision": 1.0,
+      "recall": 0.898,
+      "f1": 0.9462,
+      "support": 49
+    },
+    "Wa": {
+      "precision": 0.9643,
+      "recall": 1.0,
+      "f1": 0.9818,
+      "support": 54
+    },
+    "We": {
+      "precision": 0.9583,
+      "recall": 0.9583,
+      "f1": 0.9583,
+      "support": 48
+    },
+    "Wi": {
+      "precision": 0.9796,
+      "recall": 0.96,
+      "f1": 0.9697,
+      "support": 50
+    },
+    "Wo": {
+      "precision": 0.9344,
+      "recall": 0.95,
+      "f1": 0.9421,
+      "support": 60
+    },
+    "Wu": {
+      "precision": 0.9412,
+      "recall": 0.96,
+      "f1": 0.9505,
+      "support": 50
+    },
+    "Y": {
+      "precision": 0.8571,
+      "recall": 0.8235,
+      "f1": 0.84,
+      "support": 51
+    },
+    "Ya": {
+      "precision": 0.9365,
+      "recall": 1.0,
+      "f1": 0.9672,
+      "support": 59
+    },
+    "Ye": {
+      "precision": 1.0,
+      "recall": 0.931,
+      "f1": 0.9643,
+      "support": 58
+    },
+    "Yi": {
+      "precision": 0.9333,
+      "recall": 0.9492,
+      "f1": 0.9412,
+      "support": 59
+    },
+    "Yo": {
+      "precision": 0.875,
+      "recall": 0.875,
+      "f1": 0.875,
+      "support": 56
+    },
+    "Yu": {
+      "precision": 0.9444,
+      "recall": 0.9623,
+      "f1": 0.9533,
+      "support": 53
+    }
+  }
 }

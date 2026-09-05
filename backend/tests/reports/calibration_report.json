@@ -1,0 +1,61 @@
+{
+  "calibrator": "CalibratedClassifierCV(method='isotonic', cv='prefit')",
+  "fit_on": "validation split (never used to train weighted_svm.pkl)",
+  "n_val": 4560,
+  "n_test": 4560,
+  "test_accuracy_raw": 0.9114,
+  "test_accuracy_calibrated": 0.9112,
+  "predictions_shifted": 19,
+  "expected_calibration_error": 0.0262,
+  "reliability_bins": [
+    {
+      "bin": "[0.2,0.3)",
+      "n": 1,
+      "predicted": 0.2491,
+      "actual": 0.0
+    },
+    {
+      "bin": "[0.3,0.4)",
+      "n": 6,
+      "predicted": 0.3498,
+      "actual": 0.1667
+    },
+    {
+      "bin": "[0.4,0.5)",
+      "n": 10,
+      "predicted": 0.4409,
+      "actual": 0.3
+    },
+    {
+      "bin": "[0.5,0.6)",
+      "n": 16,
+      "predicted": 0.5501,
+      "actual": 0.5625
+    },
+    {
+      "bin": "[0.6,0.7)",
+      "n": 43,
+      "predicted": 0.6641,
+      "actual": 0.6977
+    },
+    {
+      "bin": "[0.7,0.8)",
+      "n": 151,
+      "predicted": 0.749,
+      "actual": 0.8146
+    },
+    {
+      "bin": "[0.8,0.9)",
+      "n": 1266,
+      "predicted": 0.8681,
+      "actual": 0.9028
+    },
+    {
+      "bin": "[0.9,1.0)",
+      "n": 3067,
+      "predicted": 0.9479,
+      "actual": 0.9279
+    }
+  ],
+  "num_classes": 95
+}

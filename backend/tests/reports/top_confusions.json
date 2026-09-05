@@ -1,0 +1,182 @@
+[
+  {
+    "true": "Go",
+    "pred": "G",
+    "count": 9,
+    "rate": 0.134
+  },
+  {
+    "true": "Ng",
+    "pred": "Ngo",
+    "count": 8,
+    "rate": 0.154
+  },
+  {
+    "true": "Lo",
+    "pred": "L",
+    "count": 7,
+    "rate": 0.113
+  },
+  {
+    "true": "T",
+    "pred": "To",
+    "count": 7,
+    "rate": 0.14
+  },
+  {
+    "true": "Yo",
+    "pred": "Y",
+    "count": 7,
+    "rate": 0.125
+  },
+  {
+    "true": "P",
+    "pred": "Po",
+    "count": 6,
+    "rate": 0.105
+  },
+  {
+    "true": "Po",
+    "pred": "P",
+    "count": 6,
+    "rate": 0.105
+  },
+  {
+    "true": "Ro",
+    "pred": "R",
+    "count": 6,
+    "rate": 0.118
+  },
+  {
+    "true": "So",
+    "pred": "S",
+    "count": 6,
+    "rate": 0.113
+  },
+  {
+    "true": "Y",
+    "pred": "Yo",
+    "count": 6,
+    "rate": 0.118
+  },
+  {
+    "true": "Bo",
+    "pred": "B",
+    "count": 5,
+    "rate": 0.093
+  },
+  {
+    "true": "G",
+    "pred": "Go",
+    "count": 5,
+    "rate": 0.093
+  },
+  {
+    "true": "L",
+    "pred": "Lo",
+    "count": 5,
+    "rate": 0.102
+  },
+  {
+    "true": "S",
+    "pred": "So",
+    "count": 5,
+    "rate": 0.096
+  },
+  {
+    "true": "D",
+    "pred": "Do",
+    "count": 4,
+    "rate": 0.073
+  },
+  {
+    "true": "Do",
+    "pred": "D",
+    "count": 4,
+    "rate": 0.073
+  },
+  {
+    "true": "H",
+    "pred": "Ho",
+    "count": 4,
+    "rate": 0.074
+  },
+  {
+    "true": "Ho",
+    "pred": "H",
+    "count": 4,
+    "rate": 0.074
+  },
+  {
+    "true": "M",
+    "pred": "Mo",
+    "count": 4,
+    "rate": 0.071
+  },
+  {
+    "true": "N",
+    "pred": "No",
+    "count": 4,
+    "rate": 0.078
+  },
+  {
+    "true": "No",
+    "pred": "N",
+    "count": 4,
+    "rate": 0.07
+  },
+  {
+    "true": "Ri",
+    "pred": "Re",
+    "count": 4,
+    "rate": 0.071
+  },
+  {
+    "true": "Ru",
+    "pred": "Ro",
+    "count": 4,
+    "rate": 0.073
+  },
+  {
+    "true": "Te",
+    "pred": "Ti",
+    "count": 4,
+    "rate": 0.073
+  },
+  {
+    "true": "B",
+    "pred": "Bo",
+    "count": 3,
+    "rate": 0.054
+  },
+  {
+    "true": "Gi",
+    "pred": "Ge",
+    "count": 3,
+    "rate": 0.053
+  },
+  {
+    "true": "Gu",
+    "pred": "Go",
+    "count": 3,
+    "rate": 0.053
+  },
+  {
+    "true": "Ke",
+    "pred": "Ki",
+    "count": 3,
+    "rate": 0.061
+  },
+  {
+    "true": "Ko",
+    "pred": "K",
+    "count": 3,
+    "rate": 0.057
+  },
+  {
+    "true": "Le",
+    "pred": "Li",
+    "count": 3,
+    "rate": 0.054
+  }
+]

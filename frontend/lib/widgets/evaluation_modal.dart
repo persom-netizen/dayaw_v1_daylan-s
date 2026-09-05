@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../services/api_service.dart';
 
 class EvaluationModal extends StatefulWidget {
   final List<dynamic> detections;
@@ -19,7 +20,10 @@ class EvaluationModal extends StatefulWidget {
 }
 
 class _EvaluationModalState extends State<EvaluationModal> {
-  /// --- FILTER LOGIC (STRICT 23% THRESHOLD) ---
+  bool _isArchived = false;
+  bool _isProcessing = false;
+
+  /// --- 1. FILTER LOGIC (STRICT 23% THRESHOLD) ---
   /// Only detections >= 23% are shown in the UI and included in the result text.
   List<Map<String, dynamic>> get filteredDetections {
     return widget.detections
@@ -32,7 +36,19 @@ class _EvaluationModalState extends State<EvaluationModal> {
         .toList();
   }
 
-  /// --- REBUILD RESULT TEXT FROM FILTERED DETECTIONS ---
+  /// --- 2. RECALCULATE AVERAGE ---
+  /// Recalculates the average based only on visible (>=23%) characters.
+  double get filteredAverage {
+    final list = filteredDetections;
+    if (list.isEmpty) return 0.0;
+    final total = list.fold(
+      0.0,
+      (sum, item) => sum + (item['confidence'] as num).toDouble(),
+    );
+    return total / list.length;
+  }
+
+  /// --- 3. REBUILD RESULT TEXT FROM FILTERED DETECTIONS ---
   /// Reassembles the translated text using only characters that pass the 23% filter.
   String get filteredResultText {
     final list = filteredDetections;
@@ -40,9 +56,45 @@ class _EvaluationModalState extends State<EvaluationModal> {
     return list.map((d) => d['char']?.toString() ?? '').join('');
   }
 
+  Future<void> _handleBulkArchive(
+    BuildContext context,
+    List<Map<String, dynamic>> eligible,
+  ) async {
+    if (_isArchived || _isProcessing) return;
+    setState(() => _isProcessing = true);
+
+    final ApiService apiService = ApiService();
+    bool success = await apiService.archiveBulkCharacters(
+      eligible,
+      widget.sessionId,
+    );
+
+    if (!mounted) return;
+
+    setState(() {
+      _isProcessing = false;
+      if (success) _isArchived = true;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success ? "Salamat! Data archived." : "Failed to archive.",
+        ),
+        backgroundColor: success ? Colors.green : Colors.red,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Only characters >= 23% shown in table and result
     final detectionsToShow = filteredDetections;
+
+    // Archive list: characters that passed 23% filter AND are high-confidence (>=90%)
+    final List<Map<String, dynamic>> eligibleForArchive = detectionsToShow
+        .where((d) => (d['confidence'] as num).toDouble() >= 90.0)
+        .toList();
 
     return Container(
       constraints: BoxConstraints(
@@ -88,6 +140,7 @@ class _EvaluationModalState extends State<EvaluationModal> {
                   ),
                   const SizedBox(height: 6),
 
+                  // --- FIXED: Uses filteredResultText instead of widget.translatedText ---
                   Text(
                     filteredResultText,
                     style: const TextStyle(
@@ -98,19 +151,25 @@ class _EvaluationModalState extends State<EvaluationModal> {
                   ),
                   const SizedBox(height: 20),
 
+                  // Stats use filtered data only
                   _buildStatRow(
                     "Detected Characters:",
                     "${detectionsToShow.length}",
                   ),
+                  _buildStatRow(
+                    "Average Confidence:",
+                    "${filteredAverage.toStringAsFixed(1)}%",
+                  ),
 
                   const Divider(height: 40),
 
+                  // --- TABLE: Only shows characters >= 23% ---
                   detectionsToShow.isEmpty
                       ? const Center(
                           child: Padding(
                             padding: EdgeInsets.all(20),
                             child: Text(
-                              "No characters detected.",
+                              "No characters detected above 23% confidence.",
                               textAlign: TextAlign.center,
                               style: TextStyle(color: Colors.grey),
                             ),
@@ -141,6 +200,14 @@ class _EvaluationModalState extends State<EvaluationModal> {
                                 Padding(
                                   padding: EdgeInsets.all(8.0),
                                   child: Text(
+                                    "Conf.",
+                                    style:
+                                        TextStyle(fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                                Padding(
+                                  padding: EdgeInsets.all(8.0),
+                                  child: Text(
                                     "Status",
                                     style:
                                         TextStyle(fontWeight: FontWeight.bold),
@@ -152,8 +219,21 @@ class _EvaluationModalState extends State<EvaluationModal> {
                           ],
                         ),
 
-                  const SizedBox(height: 20),
-                  _buildTempCropStatus(),
+                  const SizedBox(height: 30),
+
+                  if (eligibleForArchive.isNotEmpty)
+                    _buildArchivePermissionCard(context, eligibleForArchive)
+                  else
+                    const Center(
+                      child: Text(
+                        "No high-confidence characters eligible for archival.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      ),
+                    ),
+
+                  const SizedBox(height: 30),
+                  _buildLearningTip(),
                 ],
               ),
             ),
@@ -178,8 +258,12 @@ class _EvaluationModalState extends State<EvaluationModal> {
         ),
         Padding(
           padding: const EdgeInsets.all(8.0),
+          child: Text("${conf.toStringAsFixed(1)}%"),
+        ),
+        Padding(
+          padding: const EdgeInsets.all(8.0),
           child: Text(
-            isExcellent ? "Excellent" : "Detected",
+            isExcellent ? "Excellent" : "Good",
             style: TextStyle(
               color: isExcellent ? Colors.green : Colors.blueGrey,
               fontWeight: FontWeight.bold,
@@ -204,7 +288,73 @@ class _EvaluationModalState extends State<EvaluationModal> {
     );
   }
 
-  Widget _buildTempCropStatus() {
+  Widget _buildArchivePermissionCard(
+    BuildContext context,
+    List<Map<String, dynamic>> eligible,
+  ) {
+    final bool archived = _isArchived;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: archived ? Colors.grey[100] : Colors.orange[50],
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(
+          color: archived ? Colors.grey[300]! : Colors.orange[200]!,
+        ),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(
+                archived ? Icons.cloud_done : Icons.volunteer_activism,
+                color: archived ? Colors.grey : Colors.orange[800],
+              ),
+              const SizedBox(width: 10),
+              Text(
+                archived ? "Data Saved to Archive" : "Help Dayaw Grow",
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: archived ? Colors.grey : Colors.black,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (!archived)
+            Text(
+              "We detected ${eligible.length} high-quality strokes. Permit us to save them?",
+            ),
+          const SizedBox(height: 15),
+          ElevatedButton.icon(
+            onPressed: (archived || _isProcessing)
+                ? null
+                : () => _handleBulkArchive(context, eligible),
+            icon: _isProcessing
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                : Icon(archived ? Icons.check : Icons.check_circle_outline),
+            label: Text(
+              archived ? "Archived Successfully" : "Archive All Eligible Strokes",
+            ),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.orange[800],
+              foregroundColor: Colors.white,
+              minimumSize: const Size(double.infinity, 45),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLearningTip() {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -213,7 +363,7 @@ class _EvaluationModalState extends State<EvaluationModal> {
         borderRadius: BorderRadius.circular(10),
       ),
       child: const Text(
-        "Processed characters are kept in the temporary crop queue for review.",
+        "Tip: Clear handwriting improves AI learning!",
         style: TextStyle(fontSize: 12),
       ),
     );

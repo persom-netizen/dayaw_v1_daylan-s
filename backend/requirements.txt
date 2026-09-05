@@ -1,0 +1,21 @@
+# Backend runtime for the DAYAW Baybayin OCR API.
+# The Colab model artifacts were pickled with scikit-learn 1.6.1
+# (see MODEL_README.txt). 1.5.x loads them with an InconsistentVersionWarning
+# but produces bit-identical predictions (verified against test_predictions.npy
+# on all 4560 test samples), and weighted_svm_calibrated.pkl is fit locally on
+# whatever version is installed, so the range below is safe. Stay <1.7.
+scikit-learn>=1.5,<1.7
+# <0.26: keep remove_small_objects(min_size=...) pre-0.26 semantics (removes
+# blobs strictly smaller than min_size) to match the Colab training pipeline.
+scikit-image>=0.22,<0.26
+numpy>=1.26,<3
+scipy>=1.11
+opencv-python-headless>=4.9
+joblib>=1.3
+Flask>=3.0
+Flask-Cors>=4.0
+mysql-connector-python>=8.2
+# image decoding: Pillow is the fallback for formats OpenCV can't read;
+# pillow-heif adds HEIC/HEIF (iPhone photos).
+Pillow>=10
+pillow-heif>=0.16
