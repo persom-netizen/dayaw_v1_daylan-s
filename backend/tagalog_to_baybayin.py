@@ -38,6 +38,30 @@ class TagalogToBaybayin:
         self.danda        = '᜵'
         self.double_danda = '᜶'
 
+        # Context-tuned mark variants (PUA glyphs U+E012..U+E01B in
+        # baybayin_custom.ttf). Marks are zero-width and placed by their
+        # own coordinates (the font has no GPOS), so the base->mark gap is
+        # fixed per glyph:
+        #  - 'ha' (U+1711) is a thin mid-height stroke; the default marks
+        #    float far off, so its variants sit CLOSER (~96 units).
+        #  - 'na' (U+1708) has a descender; the default virama / below
+        #    marks merge into the loop so 'n' reads as 'na'. Its below
+        #    variants sit LOWER and the virama is nudged right off the tail.
+        # Keyed by base_map key; slot is one of e/i/o/u/x.
+        self._mark_variants = {
+            'ha': {'e': '', 'i': '', 'o': '',
+                   'u': '', 'x': ''},
+            'na': {'e': '', 'i': '', 'o': '',
+                   'u': '', 'x': ''},
+        }
+
+    def _mark(self, key, slot):
+        """Base-tuned mark for (base_map `key`, `slot` in e/i/o/u/x);
+        falls back to the default mark when the base has no tuned variant."""
+        default = {'e': self.kudlit_e, 'i': self.kudlit_i, 'o': self.kudlit_o,
+                   'u': self.kudlit_u, 'x': self.virama}[slot]
+        return self._mark_variants.get(key, {}).get(slot, default)
+
     def translate(self, text):
         if not text:
             return "", 0
@@ -96,14 +120,8 @@ class TagalogToBaybayin:
                 # O → dot below   ✅
                 # U → dash below  ✅
                 # ==================================================
-                if vowel_part == 'e':
-                    result.append(base + self.kudlit_e)   # dash above
-                elif vowel_part == 'i':
-                    result.append(base + self.kudlit_i)   # dot above
-                elif vowel_part == 'o':
-                    result.append(base + self.kudlit_o)   # dot below
-                elif vowel_part == 'u':
-                    result.append(base + self.kudlit_u)   # dash below
+                if vowel_part in ('e', 'i', 'o', 'u'):
+                    result.append(base + self._mark(key, vowel_part))
                 else:
                     result.append(base)                    # a — no kudlit
 
@@ -117,6 +135,6 @@ class TagalogToBaybayin:
 
                 base = self.base_map.get(key, '')
                 if base:
-                    result.append(base + self.virama)      # cross/x
+                    result.append(base + self._mark(key, 'x'))   # cross/x
 
         return "".join(result), max(0, confidence)
