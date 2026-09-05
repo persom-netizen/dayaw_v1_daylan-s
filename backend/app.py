@@ -47,11 +47,13 @@ for folder in [ARCHIVE_ROOT, TEMP_ROOT]:
         os.makedirs(folder)
 
 # --- Weighted HOG + spatial SVM (see backend/MODEL_README.txt) ---
-# Feature vector = 1764 HOG features ++ 26 spatial features (1790 total).
-# The two blocks are scaled by SEPARATE scalers; the spatial block is then
-# multiplied by SPATIAL_WEIGHT before the blocks are concatenated for the SVM.
-HOG_FEATURE_LEN = 1764
-SPATIAL_FEATURE_LEN = 26
+# Feature vector = HOG features ++ spatial features. The two blocks are scaled by
+# SEPARATE scalers; the spatial block is then multiplied by SPATIAL_WEIGHT before
+# the blocks are concatenated for the SVM. Lengths + the training glyph size are
+# read back from the scalers below, so a model retrained at a different
+# resolution (e.g. 96x96) drops in with no code change.
+HOG_FEATURE_LEN = 1764      # 64x64 default; overridden from hog_scaler
+SPATIAL_FEATURE_LEN = 26    # overridden from spatial_scaler
 
 model = load_joblib_artifact('weighted_svm.pkl', 'svm_model.pkl',
                              'baybayin_svm_model.pkl', 'baybayin_svm_model.sav')
@@ -60,6 +62,14 @@ spatial_scaler = load_joblib_artifact('spatial_scaler.pkl')
 _raw_weight = load_joblib_artifact('best_weight.pkl', 'spatial_weight.pkl')
 SPATIAL_WEIGHT = float(_raw_weight) if _raw_weight is not None else 6.0
 label_encoder = load_joblib_artifact('label_encoder.pkl', 'baybayin_classes.pkl', 'baybayin_classes.sav')
+
+if hog_scaler is not None and getattr(hog_scaler, 'n_features_in_', None):
+    HOG_FEATURE_LEN = int(hog_scaler.n_features_in_)
+if spatial_scaler is not None and getattr(spatial_scaler, 'n_features_in_', None):
+    SPATIAL_FEATURE_LEN = int(spatial_scaler.n_features_in_)
+# HOG length with ppc=8, cpb=2, orient=9 is ((T/8 - 1)^2) * 36, so:
+_cells = int(round((HOG_FEATURE_LEN / 36.0) ** 0.5)) + 1
+DERIVED_TARGET_SIZE = _cells * 8  # 1764 -> 64, 4356 -> 96
 
 # Isotonic probability calibrator wrapping `model` (built by calibrate_model.py).
 # When present, classify_glyph() takes both the label and the confidence from
@@ -162,29 +172,29 @@ def update_session_status(session_id, status):
 
 # --- 4. IMAGE PROCESSING & AUTO-CROP ENGINE (SMART PARAGRAPH SEGMENTATION + SVM PREDICTION) ---
 
-# Adaptive segmentation constants for multi-line Baybayin paragraphs
-# First tuning pass: slightly more tolerant of genuine handwriting while
-# reducing over-merging and false splits on paragraph-style input.
+# Adaptive segmentation constants for multi-line Baybayin paragraphs.
+# Based on training/smart_segmentation.py, then nudged from testing on real
+# handwriting: WORD_GAP_RATIO 1.5 -> 0.78 (larger values merged loosely spaced
+# words, e.g. "ako kane" -> "akokane"); H_DILATE 0.24 -> 0.20 (0.24 over-merged
+# adjacent glyphs). Within-word gaps run ~0-0.12 w, word gaps ~0.8 w+.
+# Note: connected cursive is near the ceiling of what this morphology
+# approach can do - some cuts will land wrong no matter the constants.
 STANDARD_WIDTH = 1600
 MIN_CHAR_AREA_RATIO = 0.0003
 MIN_BOX_HEIGHT_RATIO = 0.28
 MIN_BOX_WIDTH_RATIO = 0.18
 MIN_BOX_AREA_RATIO = 0.22
 EDGE_MARGIN_PX = 10
-V_DILATE_RATIO = 0.35   
+V_DILATE_RATIO = 0.38
 H_DILATE_RATIO = 0.20
 V_DILATE_FALLBACK = 45
 H_DILATE_FALLBACK = 12
-ROW_GROUPING_RATIO = 0.7
-# Word break when the gap to the next glyph exceeds this fraction of the mean
-# glyph width. Handwriting packs glyphs within a word almost edge-to-edge
-# (~0-0.1 w) while word gaps run ~0.8w+, so 0.75 separates them cleanly;
-# the old 1.2 missed loosely-spaced words.
-WORD_GAP_RATIO = 0.75
+ROW_GROUPING_RATIO = 0.65
+WORD_GAP_RATIO = 0.78
 MIN_COMPONENT_HEIGHT = 15
-SPLIT_WIDTH_RATIO = 1.8
+SPLIT_WIDTH_RATIO = 1.7
 SPLIT_SEARCH_WINDOW = 0.35
-SPLIT_MIN_GAP_RATIO = 0.35
+SPLIT_MIN_GAP_RATIO = 0.32
 MIN_SEGMENT_WIDTH_RATIO = 0.55
 BG_BLUR_KERNEL = 101
 
@@ -220,6 +230,20 @@ def deskew_image(img):
     return rotated, angle
 
 
+def flatten_background(gray, blur_kernel=BG_BLUR_KERNEL):
+    """CamScanner-style "clean to white": divide the image by a heavily blurred
+    copy of itself to cancel uneven lighting, shadows and off-white paper, then
+    stretch contrast. On an already-clean scan this is ~a no-op; on a phone
+    photo it turns a grey/shadowed background into flat white so the downstream
+    Otsu threshold isolates ink cleanly.
+    """
+    k = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
+    bg = cv2.GaussianBlur(gray, (k, k), 0)
+    bg = np.where(bg < 1, 1, bg).astype(np.uint8)
+    norm = cv2.divide(gray, bg, scale=255)
+    return cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX)
+
+
 def measure_average_char_size(gray):
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     light_kernel = np.ones((3, 3), np.uint8)
@@ -250,6 +274,7 @@ def measure_average_char_size(gray):
 def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX):
     img = normalize_image_size(img)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = flatten_background(gray)  # normalise lighting before any thresholding
     h_img, w_img = gray.shape
 
     avg_height, avg_width = measure_average_char_size(gray)
@@ -448,7 +473,9 @@ def insert_word_breaks(line_boxes, avg_width, word_gap_ratio=WORD_GAP_RATIO):
 # hog_extract_v2). Every step here must match training exactly; the README
 # and reference both warn that a mismatch silently wrecks accuracy.
 
-TARGET_SIZE = 64
+# Follows whatever size the loaded model was trained at (64 or 96), inferred
+# from the HOG scaler above.
+TARGET_SIZE = DERIVED_TARGET_SIZE
 MIN_NOISE_SIZE = 20
 PAD_RATIO = 0.12
 HOG_ORIENTATIONS = 9
@@ -557,15 +584,40 @@ def _kudlit_component_features(binary_img):
     return [n_components, largest_area_frac, secondary_area_ratio, dy, dx]
 
 
+KUDLIT_STRIP_RATIO = 0.22  # top / bottom band width, as a fraction of glyph height
+
+
+def _kudlit_strip_features(binary):
+    """Fraction of the glyph's ink that sits in the top band vs the bottom band.
+
+    The o/u kudlit is a mark *below* the body, the e/i kudlit is *above* it, and
+    a bare consonant / -a form has neither. HOG can't tell Go from G (same main
+    stroke) and the connected-component features miss a kudlit that touches the
+    body; these two numbers fire regardless (ink low in the frame -> o/u, ink
+    high -> e/i). They are appended last so an older 26-feature scaler still
+    slices cleanly."""
+    h = binary.shape[0]
+    strip = max(1, int(round(h * KUDLIT_STRIP_RATIO)))
+    total = float(binary.sum()) or 1.0
+    top_frac = float(binary[:strip].sum() / total)
+    bot_frac = float(binary[h - strip:].sum() / total)
+    return [top_frac, bot_frac]
+
+
 def _extract_spatial_features(preprocessed_img):
-    """Port of inference.extract_spatial_features (26 features): overall
-    density (1) + 2x2 grid (4) + 4x4 grid (16) + kudlit stats (5)."""
+    """Spatial feature vector: overall density (1) + 2x2 grid (4) + 4x4 grid (16)
+    + kudlit component stats (5) + kudlit top/bottom strip fractions (2) = 28.
+    The first 26 are the Colab inference.extract_spatial_features port; the
+    trailing 2 are new (see _kudlit_strip_features). _build_feature_vector
+    slices to whatever the loaded spatial_scaler expects, so this is safe with
+    both a 26- and a 28-feature model."""
     _, binary = cv2.threshold(preprocessed_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
     quadrant = _grid_density_features(binary, grid_size=2)
     fine_grid = _grid_density_features(binary, grid_size=4)
     kudlit_feats = _kudlit_component_features(binary)
-    return overall_density + quadrant + fine_grid + kudlit_feats
+    strip_feats = _kudlit_strip_features(binary)
+    return overall_density + quadrant + fine_grid + kudlit_feats + strip_feats
 
 
 def _build_feature_vector(preprocessed_img):
@@ -580,7 +632,8 @@ def _build_feature_vector(preprocessed_img):
     spatial_features = np.asarray(_extract_spatial_features(preprocessed_img), dtype=np.float64)
 
     features_hog = hog_features[:HOG_FEATURE_LEN].reshape(1, -1)
-    features_spatial = spatial_features.reshape(1, -1)
+    # slice to what the loaded model expects: 26 (V1-V4) or 28 (kudlit-strip model)
+    features_spatial = spatial_features[:SPATIAL_FEATURE_LEN].reshape(1, -1)
 
     hog_scaled = hog_scaler.transform(features_hog)
     spatial_scaled = spatial_scaler.transform(features_spatial) * SPATIAL_WEIGHT
@@ -595,35 +648,32 @@ def _decode_label(pred_int):
     return str(pred_int)
 
 
-def classify_glyph(img64):
-    """Return (glyph_name, confidence in [0, 1]) for a preprocessed 64x64 glyph.
+def classify_glyph(img64, top_k=3):
+    """Return (glyph_name, confidence in [0, 1], alternatives) for a preprocessed
+    glyph. `alternatives` is the top-`top_k` [name, confidence] pairs, most
+    likely first (so alternatives[0] == (glyph_name, confidence)) - the UI shows
+    these so a user can tap the runner-up when the top guess is wrong (the
+    kudlit confusions like K/Ko almost always have the right answer at #2).
 
-    Feature extraction + label decoding match inference.predict_character exactly.
-    Confidence:
-      * if weighted_svm_calibrated.pkl is loaded, both the label and the
-        confidence come from its isotonic-calibrated predict_proba() - an
-        honestly scaled probability (see calibrate_model.py).
-      * otherwise, fall back to argmax of the raw SVM plus a softmax over its
-        one-vs-rest decision_function margins. That proxy is poorly calibrated
-        (test-set AUROC ~0.49 for right-vs-wrong) and is only a placeholder
-        until the calibrator is built.
+    Feature extraction + label decoding match inference.predict_character. When
+    weighted_svm_calibrated.pkl is loaded the scores are isotonic-calibrated
+    probabilities; otherwise they are a softmax over the raw SVM margins
+    (poorly calibrated - a placeholder until the calibrator is built).
     """
     vec = _build_feature_vector(img64)
 
     if calibrated_model is not None:
-        proba = calibrated_model.predict_proba(vec)[0]
-        best = int(np.argmax(proba))
-        char = _decode_label(calibrated_model.classes_[best])
-        return char, float(proba[best])
-
-    char = _decode_label(model.predict(vec)[0])
-    try:
+        scores = calibrated_model.predict_proba(vec)[0]
+        classes = calibrated_model.classes_
+    else:
         margins = model.decision_function(vec)[0]
         exp = np.exp(margins - np.max(margins))
-        conf = float(np.max(exp / exp.sum()))
-    except Exception:
-        conf = 1.0
-    return char, conf
+        scores = exp / exp.sum()
+        classes = model.classes_
+
+    order = np.argsort(scores)[::-1][:max(1, top_k)]
+    alternatives = [[_decode_label(classes[i]), float(scores[i])] for i in order]
+    return alternatives[0][0], alternatives[0][1], alternatives
 
 
 class UnsupportedImageError(Exception):
@@ -659,13 +709,23 @@ def _decode_image_bytes(image_bytes):
 
 
 def _score_gray_crop(gray_patch):
-    """Confidence in [0, 1] that `gray_patch` is a single clean glyph.
-    Used to validate geometric box splits (see resolve_merge_or_split)."""
+    """A "looks like one clean glyph" score for `gray_patch`, used only to
+    arbitrate box splits (resolve_merge_or_split).
+
+    Uses the RAW SVM top one-vs-rest margin, not the calibrated probability:
+    a merged two-glyph blob falls between decision boundaries and gets a low
+    top margin, whereas the isotonic calibration would report it at ~0.95 and
+    wrongly keep the merge.
+    """
     crop = _prepare_character_crop(gray_patch)
     if crop is None:
-        return -1.0
-    _, conf = classify_glyph(crop)
-    return conf
+        return -1e9
+    try:
+        vec = _build_feature_vector(crop)
+        return float(np.max(model.decision_function(vec)[0]))
+    except Exception:
+        _, conf, _ = classify_glyph(crop)
+        return conf
 
 
 def _titlecase_words(text):
@@ -706,12 +766,14 @@ def preprocess_and_predict(image_bytes, session_id):
     os.makedirs(session_temp_dir, exist_ok=True)
 
     crop_index = 0
-    for line in lines:
+    for line_idx, line in enumerate(lines):
         line_chars = []
         tokens = insert_word_breaks(line, avg_width)
+        pending_space = False
         for i, token in enumerate(tokens):
             if token is None:
                 line_chars.append(" ")
+                pending_space = True
                 continue
 
             x, y, w, h = token
@@ -732,7 +794,7 @@ def preprocess_and_predict(image_bytes, session_id):
             if img_final is None:
                 continue
 
-            char, conf = classify_glyph(img_final)
+            char, conf, alternatives = classify_glyph(img_final)
 
             abs_x = int(x + ink_x)
             abs_y = int(y + ink_y)
@@ -748,11 +810,18 @@ def preprocess_and_predict(image_bytes, session_id):
                 "confidence": round(conf * 100, 2),
                 "is_eligible": conf >= CONF_LIMIT,
                 "temp_path": temp_path,
+                # top-3 [name, percent] guesses, best first; the UI lets the
+                # user tap a runner-up when the top pick is wrong.
+                "alternatives": [[c, round(s * 100, 2)] for c, s in alternatives],
+                # layout so the client can rebuild the formatted text after edits
+                "line": line_idx,
+                "space_before": pending_space,
                 # tighter box that follows the actual ink footprint of the glyph
                 "bbox_px": [abs_x, abs_y, abs_w, abs_h],
                 "bbox": [round(abs_x / proc_w, 5), round(abs_y / proc_h, 5),
                          round(abs_w / proc_w, 5), round(abs_h / proc_h, 5)],
             })
+            pending_space = False
             confidences.append(conf)
             crop_index += 1
 

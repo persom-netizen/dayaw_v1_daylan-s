@@ -18,6 +18,11 @@ dependencies:
   crop_your_image: ^1.0.6
   image: ^4.0.17
 
+  # on-device scan logging for field testing (no backend needed)
+  path_provider: ^2.1.4
+  share_plus: ^10.1.2
+  archive: ^3.6.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

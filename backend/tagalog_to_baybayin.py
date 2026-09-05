@@ -4,7 +4,14 @@ class TagalogToBaybayin:
     def __init__(self):
         self.base_map = {
             # Vowels
-            'a': 'ᜀ', 'e': 'ᜁ', 'i': 'ᜁ', 'o': 'ᜂ', 'u': 'ᜂ',
+            # Standalone vowels. Bare I and U share a base glyph with E and O,
+            # so the lone letters map to dedicated glyphs in baybayin_custom.ttf
+            # (E010 = the I/E shape + a short vertical line centred above;
+            #  E011 = the U/O shape + a short vertical tick at the bottom-right).
+            # This keeps a typed "i" / "u" from round-tripping through the BTL
+            # OCR as "e" / "o". Consonant+i/u are unaffected (they use the
+            # kudlit marks below).
+            'a': 'ᜀ', 'e': 'ᜁ', 'i': '', 'o': 'ᜂ', 'u': '',
 
             # Consonants with inherent A vowel
             'ba': 'ᜊ', 'ka': 'ᜃ', 'da': 'ᜇ',

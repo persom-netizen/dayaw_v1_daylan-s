@@ -81,12 +81,12 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.svm import SVC
 
 # ============================================================================
-# CONFIG  -  keep in sync with backend/app.py. Changing TARGET_SIZE, the HOG
-# params, or the spatial feature set REQUIRES matching edits in app.py
-# (_prepare_character_crop / _extract_spatial_features / the HOG_FEATURE_LEN
-# constant). The defaults here == the current backend.
+# CONFIG. backend/app.py reads the glyph size + feature lengths back from the
+# scalers this script produces, so --target-size drops in with no app.py edit.
+# The HOG params and the 26 spatial features must NOT change without matching
+# edits in app.py's _build_feature_vector / _extract_spatial_features.
 # ============================================================================
-TARGET_SIZE = 64
+TARGET_SIZE = 64           # overridden by --target-size (64 or 96)
 MIN_NOISE_SIZE = 20
 PAD_RATIO = 0.12
 
@@ -94,9 +94,20 @@ HOG_ORIENTATIONS = 9
 HOG_PIXELS_PER_CELL = (8, 8)
 HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_BLOCK_NORM = "L2-Hys"
-N_HOG_FEATURES = 1764
-N_SPATIAL_FEATURES = 26
-N_FEATURES = N_HOG_FEATURES + N_SPATIAL_FEATURES  # 1790
+# 26 = the Colab port; +2 = top/bottom kudlit-strip ink fractions (see
+# extract_spatial_features / app.py._kudlit_strip_features). app.py reads this
+# length back from the spatial scaler, so 28-feature models drop in unchanged.
+N_SPATIAL_FEATURES = 28
+
+
+def _hog_len(target_size):
+    cells = target_size // HOG_PIXELS_PER_CELL[0]
+    blocks = cells - (HOG_CELLS_PER_BLOCK[0] - 1)
+    return blocks * blocks * (HOG_CELLS_PER_BLOCK[0] ** 2) * HOG_ORIENTATIONS
+
+
+N_HOG_FEATURES = _hog_len(TARGET_SIZE)          # 64 -> 1764, 96 -> 4356
+N_FEATURES = N_HOG_FEATURES + N_SPATIAL_FEATURES
 
 SEED = 42
 TEST_FRAC = 0.15          # fraction of everything held out for the test report
@@ -114,8 +125,10 @@ IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 # byte-identical port of these (verified: reproduces test_predictions.npy on
 # all 4560 old test samples). DO NOT edit one without the others.
 # ============================================================================
-def preprocess_image(gray, target_size=TARGET_SIZE, min_noise_size=MIN_NOISE_SIZE,
+def preprocess_image(gray, target_size=None, min_noise_size=MIN_NOISE_SIZE,
                      pad_ratio=PAD_RATIO):
+    if target_size is None:
+        target_size = TARGET_SIZE  # module global, may be set by --target-size
     if gray is None or gray.size == 0:
         return None
 
@@ -179,13 +192,29 @@ def kudlit_component_features(binary_img):
     return [n_components, largest_area_frac, secondary_area_ratio, dy, dx]
 
 
+KUDLIT_STRIP_RATIO = 0.22  # top / bottom band width, fraction of glyph height
+
+
+def kudlit_strip_features(binary):
+    """Fraction of ink in the top band vs the bottom band. o/u kudlit sits
+    below the body, e/i above, bare/-a has neither - and unlike the connected-
+    component features these still fire when the mark touches the glyph.
+    Appended last so a 26-feature model still slices cleanly (see app.py)."""
+    h = binary.shape[0]
+    strip = max(1, int(round(h * KUDLIT_STRIP_RATIO)))
+    total = float(binary.sum()) or 1.0
+    return [float(binary[:strip].sum() / total),
+            float(binary[h - strip:].sum() / total)]
+
+
 def extract_spatial_features(pre_img):
     _, binary = cv2.threshold(pre_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
     quadrant = grid_density_features(binary, grid_size=2)
     fine_grid = grid_density_features(binary, grid_size=4)
     kudlit_feats = kudlit_component_features(binary)
-    return overall_density + quadrant + fine_grid + kudlit_feats
+    strip_feats = kudlit_strip_features(binary)
+    return overall_density + quadrant + fine_grid + kudlit_feats + strip_feats
 
 
 def extract_combined_features(pre_img):
@@ -351,13 +380,14 @@ def sha256(path):
 
 
 def run(data, out, augment=0, C=SVC_C_DEFAULT, search_c="", weight_grid="",
-        fixed_weight=0, limit_per_class=0, n_jobs=-1):
+        fixed_weight=0, limit_per_class=0, n_jobs=-1, target_size=64):
     """Notebook entry point - call this instead of using the CLI, e.g.:
         run(data="/content/drive/MyDrive/ALL_DATASET",
-            out="/content/drive/MyDrive/WEIGHTED_MODEL_V3")
+            out="/content/drive/MyDrive/WEIGHTED_MODEL_V4",
+            augment=2, target_size=96)
     """
     argv = ["--data", str(data), "--out", str(out), "--augment", str(augment),
-            "--C", str(C), "--n-jobs", str(n_jobs)]
+            "--C", str(C), "--n-jobs", str(n_jobs), "--target-size", str(target_size)]
     if search_c:
         argv += ["--search-c", str(search_c)]
     if weight_grid:
@@ -385,7 +415,17 @@ def main(argv=None):
                     help="skip the weight search and use this value")
     ap.add_argument("--limit-per-class", type=int, default=0, help="smoke-test cap")
     ap.add_argument("--n-jobs", type=int, default=-1)
+    ap.add_argument("--target-size", type=int, default=64, choices=[48, 64, 80, 96, 128],
+                    help="glyph resize (default 64). 96 makes the kudlit dot/mark "
+                         "~2x bigger for the model; app.py auto-adapts from the scaler.")
     args = ap.parse_args(argv)
+
+    global TARGET_SIZE, N_HOG_FEATURES, N_FEATURES
+    TARGET_SIZE = args.target_size
+    N_HOG_FEATURES = _hog_len(TARGET_SIZE)
+    N_FEATURES = N_HOG_FEATURES + N_SPATIAL_FEATURES
+    print(f"target_size {TARGET_SIZE} -> {N_HOG_FEATURES} HOG + {N_SPATIAL_FEATURES} "
+          f"spatial = {N_FEATURES} features")
 
     out = Path(args.out)
     (out / "splits").mkdir(parents=True, exist_ok=True)
@@ -565,7 +605,7 @@ def main(argv=None):
         f"  HOG: orientations={HOG_ORIENTATIONS} ppc={HOG_PIXELS_PER_CELL} "
         f"cpb={HOG_CELLS_PER_BLOCK} block_norm={HOG_BLOCK_NORM} -> {N_HOG_FEATURES}\n"
         f"  spatial: overall density(1) + 2x2 grid(4) + 4x4 grid(16) + kudlit stats(5) "
-        f"-> {N_SPATIAL_FEATURES}\n"
+        f"+ top/bottom strip(2) -> {N_SPATIAL_FEATURES}\n"
         f"  scale HOG block with hog_scaler; scale spatial block with spatial_scaler "
         f"then x {weight}; concat -> {N_FEATURES}\n"
         f"  SVC(C={C}, gamma='{SVC_GAMMA}', class_weight='balanced'); "

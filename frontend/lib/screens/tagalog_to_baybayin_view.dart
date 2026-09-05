@@ -1,6 +1,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../services/api_service.dart';
+
+/// Forces typed input to lower case (Baybayin has no case, and the backend
+/// lowercases anyway — this keeps the on-screen text consistent for screenshots).
+class _LowercaseFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    return newValue.copyWith(text: newValue.text.toLowerCase());
+  }
+}
 
 /// Handles the "Tagalog to Baybayin" mode: debounced auto-translate as the
 /// user types, with confidence display. Fully self-contained — owns its
@@ -16,8 +27,13 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
   final ApiService _apiService = ApiService();
   final TextEditingController _textController = TextEditingController();
 
-  // Debounce timer so we don't fire a request on every keystroke — waits
-  // for a short pause in typing before translating automatically.
+  // Compact Baybayin rendering so 5-6 lines fit on screen (for screenshotting
+  // and feeding into the Baybayin->Tagalog test flow).
+  static const double _glyphSize = 22.0;
+  static const double _charGap = 2.0; // spacing between glyphs within a word
+  static const double _wordGap = 30.0; // large, unmistakable gap between words
+  static const double _lineHeight = 1.5;
+
   Timer? _debounce;
 
   String _translatedResult = "Result will appear here";
@@ -31,8 +47,6 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
     super.dispose();
   }
 
-  /// Called on every keystroke. Restarts a 350ms timer each time so the
-  /// actual translation only fires once typing pauses.
   void _onTextChanged(String text) {
     if (_debounce?.isActive ?? false) _debounce!.cancel();
     _debounce = Timer(const Duration(milliseconds: 350), () {
@@ -50,9 +64,7 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
       return;
     }
 
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() => _isLoading = true);
 
     final response = await _apiService.uploadAndTranslateDetailed(
       null,
@@ -80,6 +92,48 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
     return Colors.red;
   }
 
+  /// Renders the translation with a clear, wider gap between words than between
+  /// the glyphs inside a word (a plain string can't do that — `letterSpacing`
+  /// hits every character equally).
+  Widget _buildBaybayin() {
+    final isPlaceholder = _translatedResult == "Result will appear here" ||
+        _translatedResult == "No result" ||
+        _translatedResult.startsWith("Error");
+    if (isPlaceholder) {
+      return Text(_translatedResult,
+          style: const TextStyle(color: Colors.grey, fontSize: 14));
+    }
+
+    const style = TextStyle(
+      fontFamily: 'BaybayinCustom',
+      fontSize: _glyphSize,
+      color: Colors.black87,
+      height: _lineHeight,
+      letterSpacing: _charGap,
+    );
+
+    final lines = _translatedResult.split('\n');
+    final spans = <InlineSpan>[];
+    for (var li = 0; li < lines.length; li++) {
+      if (li > 0) spans.add(const TextSpan(text: '\n'));
+      final words = lines[li]
+          .trim()
+          .split(RegExp(r'\s+'))
+          .where((w) => w.isNotEmpty)
+          .toList();
+      for (var wi = 0; wi < words.length; wi++) {
+        if (wi > 0) {
+          spans.add(const WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: SizedBox(width: _wordGap),
+          ));
+        }
+        spans.add(TextSpan(text: words[wi]));
+      }
+    }
+    return Text.rich(TextSpan(style: style, children: spans));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -90,79 +144,87 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
       ),
       clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(16.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
-            Expanded(
+            // Compact, self-scrolling input so the Baybayin output gets most
+            // of the card height.
+            SizedBox(
+              height: 96,
               child: TextField(
                 controller: _textController,
                 onChanged: _onTextChanged,
+                inputFormatters: [_LowercaseFormatter()],
+                expands: true,
                 maxLines: null,
+                minLines: null,
                 keyboardType: TextInputType.multiline,
+                textCapitalization: TextCapitalization.none,
+                textAlignVertical: TextAlignVertical.top,
                 decoration: const InputDecoration(
                   hintText: "Enter Tagalog text here...",
                   border: InputBorder.none,
+                  isDense: true,
                 ),
-                style: const TextStyle(fontSize: 16),
+                style: const TextStyle(fontSize: 15),
               ),
             ),
-            const Divider(height: 20, color: Colors.grey),
+            const Divider(height: 12, color: Colors.grey),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      "Baybayin Translation:",
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: Colors.grey,
+                          fontSize: 13),
+                    ),
+                    if (_isLoading) ...[
+                      const SizedBox(width: 8),
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.brown),
+                      ),
+                    ],
+                  ],
+                ),
+                if (_confidenceScore > 0.0)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: _getConfidenceColor().withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      "Confidence: ${_confidenceScore.toStringAsFixed(1)}%",
+                      style: TextStyle(
+                          color: _getConfidenceColor(),
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
             Expanded(
               child: Align(
                 alignment: Alignment.topLeft,
                 child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              const Text(
-                                "Baybayin Translation:",
-                                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey),
-                              ),
-                              if (_isLoading) ...[
-                                const SizedBox(width: 8),
-                                const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.brown),
-                                ),
-                              ],
-                            ],
-                          ),
-                          if (_confidenceScore > 0.0)
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: _getConfidenceColor().withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                "Confidence: ${_confidenceScore.toStringAsFixed(1)}%",
-                                style: TextStyle(color: _getConfidenceColor(), fontWeight: FontWeight.bold, fontSize: 12),
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _translatedResult,
-                        style: const TextStyle(fontFamily: 'BaybayinCustom', fontSize: 38, color: Colors.black87, height: 2.5, letterSpacing: 6.0),
-                      ),
-                    ],
-                  ),
+                  child: _buildBaybayin(),
                 ),
               ),
             ),
-            // "Translate" button removed — translation runs automatically
-            // as the user types. Only a clear button remains.
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 IconButton(
+                  visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.clear, color: Colors.grey),
                   onPressed: () {
                     _debounce?.cancel();

@@ -3,12 +3,13 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
+import '../services/scan_logger.dart';
 import '../widgets/image_cropper_widget.dart';
-import '../widgets/evaluation_modal.dart';
+import 'btl_result_screen.dart';
 
-/// Handles the "Baybayin to Tagalog" mode: capture/upload a photo, crop it,
-/// send it for translation, and show the result. Fully self-contained —
-/// owns its own state, independent of the text-translation mode.
+/// "Baybayin to Tagalog" mode: capture / upload a photo, crop it, send it for
+/// translation, then push a full result page (image with bounding boxes +
+/// scores + tap-to-correct).
 class BaybayinToTagalogView extends StatefulWidget {
   const BaybayinToTagalogView({super.key});
 
@@ -20,72 +21,83 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
   final ApiService _apiService = ApiService();
   final ImagePicker _picker = ImagePicker();
 
-  String _translatedResult = "Result will appear here";
+  Uint8List? _lastImage;
   bool _isLoading = false;
-  Uint8List? _webImage;
-  Size? _decodedImageSize;
-  List<Map<String, dynamic>> _detectionBoxes = [];
+  String _status = "";
 
-  Future<void> _loadImageDimensions(Uint8List imageBytes) async {
-    final codec = await ui.instantiateImageCodec(imageBytes);
-    final frame = await codec.getNextFrame();
-    if (!mounted) return;
-
-    setState(() {
-      _decodedImageSize = Size(
-        frame.image.width.toDouble(),
-        frame.image.height.toDouble(),
-      );
-    });
+  Future<Size?> _decodeSize(Uint8List bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      return Size(frame.image.width.toDouble(), frame.image.height.toDouble());
+    } catch (_) {
+      return null;
+    }
   }
 
-  Future<void> _processCroppedImage(Uint8List imageBytes) async {
+  Future<void> _scan(Uint8List croppedBytes) async {
     setState(() {
       _isLoading = true;
-      _translatedResult = 'Processing Image...';
+      _status = "Processing image…";
+      _lastImage = croppedBytes;
     });
 
-    await _loadImageDimensions(imageBytes);
-
+    final size = await _decodeSize(croppedBytes);
     final response = await _apiService.uploadAndTranslateDetailed(
       null,
       'Baybayin to Tagalog',
-      imageBytes: imageBytes,
+      imageBytes: croppedBytes,
     );
+    if (!mounted) return;
 
+    if (response == null) {
+      setState(() {
+        _isLoading = false;
+        _status = "Error: connection failed.";
+      });
+      return;
+    }
+
+    final detections =
+        (response['individual_detections'] as List? ?? []).whereType<Map>();
+    final status = response['status']?.toString().toLowerCase() ?? '';
+
+    if (detections.isEmpty || status == 'no_characters') {
+      setState(() {
+        _isLoading = false;
+        _status = "No Baybayin letters found. Try a clearer crop.";
+      });
+      return;
+    }
+
+    String? scanId;
+    scanId = await ScanLogger.instance
+        .logScan(imageBytes: croppedBytes, response: response);
     if (!mounted) return;
 
     setState(() {
       _isLoading = false;
-      if (response != null) {
-        _translatedResult = response['translated_text'] ?? 'No result';
-        _detectionBoxes = (response['individual_detections'] as List? ?? [])
-            .whereType<Map>()
-            .map((d) => Map<String, dynamic>.from(d))
-            .toList();
-
-        String status = response['status']?.toString().toLowerCase() ?? '';
-        if (status == 'success' || status == 'low_confidence') {
-          Future.delayed(const Duration(milliseconds: 500), () {
-            if (mounted) _showEvaluation(response);
-          });
-        } else if (status == 'no_characters' || _translatedResult.isEmpty) {
-          _translatedResult = 'No Baybayin letters found. Try a clearer crop.';
-          _detectionBoxes = [];
-        }
-      } else {
-        _translatedResult = 'Error: Connection Failed';
-        _detectionBoxes = [];
-      }
+      _status = "";
     });
+
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => BtlResultScreen(
+        imageBytes: croppedBytes,
+        imageSize: size,
+        response: response,
+        scanId: scanId,
+      ),
+    ));
   }
 
   Future<void> _selectAndCropImage(ImageSource source) async {
+    // Keep plenty of resolution: a downscaled paragraph leaves each glyph too
+    // small for the segmentation / OCR.
     final XFile? photo = await _picker.pickImage(
       source: source,
-      imageQuality: 80,
-      maxWidth: 700,
-      maxHeight: 700,
+      imageQuality: 95,
+      maxWidth: 2400,
+      maxHeight: 2400,
     );
     if (photo == null) return;
 
@@ -95,97 +107,48 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
     final Uint8List? croppedBytes = await Navigator.of(context).push<Uint8List>(
       MaterialPageRoute(builder: (_) => ImageCropperScreen(imageData: bytes)),
     );
+    if (croppedBytes == null || !mounted) return;
 
-    if (croppedBytes == null) return;
-
-    setState(() {
-      _isLoading = true;
-      _translatedResult = 'Processing Image...';
-      _detectionBoxes = [];
-      _decodedImageSize = null;
-      // Send the raw cropped photo as-is — no client-side binarization.
-      // app.py's Otsu-based pipeline is the single source of truth for
-      // binarization and is tuned to handle lighting/shadows itself.
-      _webImage = croppedBytes;
-    });
-
-    await _loadImageDimensions(croppedBytes);
-
-    await _processCroppedImage(croppedBytes);
+    await _scan(croppedBytes);
   }
 
-  Future<void> _uploadFromGallery() async {
-    await _selectAndCropImage(ImageSource.gallery);
-  }
-
-  Future<void> _captureFromCamera() async {
-    await _selectAndCropImage(ImageSource.camera);
-  }
-
-  void _showEvaluation(Map<String, dynamic> data) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => EvaluationModal(
-        detections: data['individual_detections'] ?? [],
-        averageConfidence: (data['confidence'] as num).toDouble(),
-        translatedText: data['translated_text'] ?? "",
-        sessionId: data['session_id'] ?? 0,
-      ),
-    );
-  }
-
-  Widget _buildImageDisplay() {
-    final imageContent = _webImage != null
-        ? Image.memory(_webImage!, fit: BoxFit.contain)
-        : Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: const [
-                Icon(Icons.document_scanner, size: 64, color: Colors.brown),
-                SizedBox(height: 12),
-                Text(
-                  "Upload or scan a document containing Baybayin scripts to transcribe",
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.grey, fontSize: 14),
-                ),
-              ],
-            ),
-          );
-
+  Widget _buildImageArea() {
     return Stack(
       children: [
-        Center(child: imageContent),
-        if (_webImage != null && _detectionBoxes.isNotEmpty)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: CustomPaint(
-                painter: DetectionOverlayPainter(
-                  _detectionBoxes,
-                  _decodedImageSize ?? Size.infinite,
+        Center(
+          child: _lastImage != null
+              ? Image.memory(_lastImage!, fit: BoxFit.contain)
+              : const Padding(
+                  padding: EdgeInsets.all(24.0),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.document_scanner, size: 64, color: Colors.brown),
+                      SizedBox(height: 12),
+                      Text(
+                        "Upload or scan a document containing Baybayin scripts to transcribe",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey, fontSize: 14),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ),
-          ),
+        ),
         if (_isLoading)
           Positioned.fill(
             child: ColoredBox(
               color: Colors.black.withValues(alpha: 0.24),
-              child: Center(
+              child: const Center(
                 child: Card(
                   child: Padding(
-                    padding: const EdgeInsets.all(20),
+                    padding: EdgeInsets.all(20),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
-                      children: const [
+                      children: [
                         CircularProgressIndicator(color: Colors.brown),
                         SizedBox(height: 12),
-                        Text(
-                          "Processing text algorithm...",
-                          style: TextStyle(fontWeight: FontWeight.w500),
-                        ),
+                        Text("Processing text algorithm…",
+                            style: TextStyle(fontWeight: FontWeight.w500)),
                       ],
                     ),
                   ),
@@ -193,7 +156,7 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
               ),
             ),
           )
-        else if (_webImage != null)
+        else if (_status.isNotEmpty)
           Positioned(
             bottom: 0,
             left: 0,
@@ -202,12 +165,11 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
               padding: const EdgeInsets.all(12),
               color: Colors.black54,
               child: Text(
-                _translatedResult,
+                _status,
                 style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold),
                 textAlign: TextAlign.center,
               ),
             ),
@@ -216,51 +178,27 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
     );
   }
 
-  Widget _buildUploadWidget() {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.brown.withValues(alpha: 0.1),
-            shape: BoxShape.circle,
+  Widget _circleButton(IconData icon, String label, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.brown.withValues(alpha: 0.1),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, size: 28, color: Colors.brown),
           ),
-          child: const Icon(Icons.photo_library, size: 28, color: Colors.brown),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          "Gallery",
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: Colors.black87,
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCameraWidget() {
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.brown.withValues(alpha: 0.1),
-            shape: BoxShape.circle,
-          ),
-          child: const Icon(Icons.camera_alt, size: 28, color: Colors.brown),
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          "Camera",
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: Colors.black87,
-          ),
-        ),
-      ],
+          const SizedBox(height: 8),
+          Text(label,
+              style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.black87)),
+        ],
+      ),
     );
   }
 
@@ -276,7 +214,7 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
               borderRadius: BorderRadius.circular(15),
             ),
             clipBehavior: Clip.antiAlias,
-            child: _buildImageDisplay(),
+            child: _buildImageArea(),
           ),
         ),
         const SizedBox(height: 30),
@@ -285,114 +223,15 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              GestureDetector(
-                onTap: _uploadFromGallery,
-                child: _buildUploadWidget(),
-              ),
+              _circleButton(Icons.photo_library, "Gallery",
+                  () => _selectAndCropImage(ImageSource.gallery)),
               const SizedBox(width: 40),
-              GestureDetector(
-                onTap: _captureFromCamera,
-                child: _buildCameraWidget(),
-              ),
+              _circleButton(Icons.camera_alt, "Camera",
+                  () => _selectAndCropImage(ImageSource.camera)),
             ],
           ),
         ),
       ],
     );
-  }
-}
-
-class DetectionOverlayPainter extends CustomPainter {
-  final List<Map<String, dynamic>> detections;
-  final Size imageSize;
-
-  DetectionOverlayPainter(this.detections, this.imageSize);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (detections.isEmpty) return;
-
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2.0
-      ..color = Colors.yellowAccent.withValues(alpha: 0.95);
-
-    final fillPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..color = Colors.yellow.withValues(alpha: 0.08);
-
-    for (final detection in detections) {
-      final pixelBox = detection['bbox_px'] as List<dynamic>?;
-      final normalizedBox = detection['bbox'] as List<dynamic>?;
-
-      final box = pixelBox != null && pixelBox.length >= 4
-          ? pixelBox
-          : normalizedBox;
-
-      if (box == null || box.length < 4) continue;
-
-      final x = (box[0] as num).toDouble();
-      final y = (box[1] as num).toDouble();
-      final w = (box[2] as num).toDouble();
-      final h = (box[3] as num).toDouble();
-
-      if (imageSize.isFinite) {
-        final rect = Rect.fromLTWH(
-          (x / imageSize.width) * size.width,
-          (y / imageSize.height) * size.height,
-          (w / imageSize.width) * size.width,
-          (h / imageSize.height) * size.height,
-        );
-
-        if (rect.width <= 0 || rect.height <= 0) continue;
-
-        final insetX = rect.width * 0.05;
-        final insetY = rect.height * 0.05;
-        final tightRect = Rect.fromLTWH(
-          rect.left + insetX,
-          rect.top + insetY,
-          (rect.width - insetX * 2).clamp(0.0, size.width),
-          (rect.height - insetY * 2).clamp(0.0, size.height),
-        );
-
-        if (tightRect.width <= 0 || tightRect.height <= 0) continue;
-
-        canvas.drawRect(tightRect, fillPaint);
-        canvas.drawRect(tightRect, paint);
-        continue;
-      }
-
-      final rect = Rect.fromLTWH(
-        x * size.width,
-        y * size.height,
-        w * size.width,
-        h * size.height,
-      );
-
-      final insetX = rect.width * 0.05;
-      final insetY = rect.height * 0.05;
-      final tightRect = Rect.fromLTWH(
-        rect.left + insetX,
-        rect.top + insetY,
-        (rect.width - insetX * 2).clamp(0.0, size.width),
-        (rect.height - insetY * 2).clamp(0.0, size.height),
-      );
-
-      if (tightRect.width <= 0 || tightRect.height <= 0) continue;
-
-      canvas.drawRect(tightRect, fillPaint);
-      canvas.drawRect(tightRect, paint);
-
-      if (rect.width <= 0 || rect.height <= 0) continue;
-
-      canvas.drawRect(rect, fillPaint);
-      canvas.drawRect(rect, paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant DetectionOverlayPainter oldDelegate) {
-    return oldDelegate.detections != detections ||
-        oldDelegate.imageSize != imageSize;
   }
 }
