@@ -159,8 +159,9 @@ Small grid over the SVM's `C`. Won't fix kudlit on its own but worth a pass once
 | change | why it helps kudlit | app.py edits |
 |---|---|---|
 | `TARGET_SIZE = 96` | a kudlit dot goes from ~a few px to ~2× — HOG can actually see it | set `TARGET_SIZE = 96` in `app.py`; `HOG_FEATURE_LEN` becomes `(96/8−1)²·2²·9 = 2916` — update that constant and `training`'s `N_HOG_FEATURES`. Retrain (scalers change dim). |
-| add 2 features: top-strip and bottom-strip ink fraction (rows 0–15 / 48–63) | explicit "is there a mark above / below the body" signal, separate from the base glyph | append them in **both** `_extract_spatial_features` (here and in `app.py`) in the same order; bump `N_SPATIAL_FEATURES`/`SPATIAL_FEATURE_LEN` 26→28 in both. Retrain. |
-| two-stage head: base consonant, then kudlit | removes the imbalance problem entirely | larger `app.py` change (two models); only if a/b/c aren't enough |
+| **(done)** +2 features: top-strip / bottom-strip ink fraction | "is there a mark above / below the body" | `kudlit_strip_features` in both files; `N_SPATIAL_FEATURES` 26→28 |
+| **(done)** +4 features: kudlit **mark shape** — aspect ratio + relative width of the mark in the top band and the bottom band | this is the **dash-vs-dot** signal (`Ne`↔`Ni`, `Nu`↔`No`). A dash → aspect > ~2, wide; a dot → aspect ~1, narrow. Density / position features fire the same for both. | `kudlit_shape_features` in **both** `train_weighted_model.py` and `app.py` (keep identical), appended last; `N_SPATIAL_FEATURES` 28→**32**. `app.py` reads the length back from the scaler, so a 26/28/32-feature model all drop in. **Retrain to activate.** |
+| two-stage head: base consonant, then kudlit | removes the imbalance problem entirely | larger `app.py` change (two models); only if the above aren't enough |
 
 Keep the training script's `CONFIG` block and `app.py`'s constants identical —
 that invariant is what makes the artifacts drop-in.

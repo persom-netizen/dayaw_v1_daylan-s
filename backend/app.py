@@ -756,20 +756,53 @@ def _kudlit_strip_features(binary):
     return [top_frac, bot_frac]
 
 
+KUDLIT_SHAPE_BAND = 0.16  # top / bottom band, fraction of glyph height
+
+
+def _kudlit_shape_features(binary):
+    """Shape of the mark in the top band vs the bottom band:
+    [top_aspect, top_relwidth, bot_aspect, bot_relwidth].
+
+    A *dash* kudlit is wide and flat (aspect w/h > ~2, spans a big share of the
+    glyph width); a *dot* kudlit is compact (aspect ~1, narrow). Density and
+    position features fire the same for both, so this is the signal that
+    separates Ne/Ni (dash vs dot above) and Nu/No (dash vs dot below).
+    Appended last so a shorter scaler still slices cleanly."""
+    h, w = binary.shape
+    band = max(1, int(round(h * KUDLIT_SHAPE_BAND)))
+    cols_all = np.where(binary.sum(axis=0) > 0)[0]
+    glyph_w = float(cols_all[-1] - cols_all[0] + 1) if cols_all.size else float(w)
+
+    def strip_shape(strip):
+        cs = np.where(strip.sum(axis=0) > 0)[0]
+        rs = np.where(strip.sum(axis=1) > 0)[0]
+        if cs.size == 0 or rs.size == 0:
+            return [0.0, 0.0]
+        mw = float(cs[-1] - cs[0] + 1)
+        mh = float(rs[-1] - rs[0] + 1)
+        return [min(6.0, mw / max(1.0, mh)),
+                min(1.5, mw / max(1.0, glyph_w))]
+
+    return strip_shape(binary[:band]) + strip_shape(binary[h - band:])
+
+
 def _extract_spatial_features(preprocessed_img):
     """Spatial feature vector: overall density (1) + 2x2 grid (4) + 4x4 grid (16)
-    + kudlit component stats (5) + kudlit top/bottom strip fractions (2) = 28.
+    + kudlit component stats (5) + kudlit top/bottom strip fractions (2)
+    + kudlit top/bottom mark shape (4) = 32.
     The first 26 are the Colab inference.extract_spatial_features port; the
-    trailing 2 are new (see _kudlit_strip_features). _build_feature_vector
-    slices to whatever the loaded spatial_scaler expects, so this is safe with
-    both a 26- and a 28-feature model."""
+    trailing 6 are new (see _kudlit_strip_features / _kudlit_shape_features).
+    _build_feature_vector slices to whatever the loaded spatial_scaler expects,
+    so this is safe with a 26-, 28- or 32-feature model."""
     _, binary = cv2.threshold(preprocessed_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
     quadrant = _grid_density_features(binary, grid_size=2)
     fine_grid = _grid_density_features(binary, grid_size=4)
     kudlit_feats = _kudlit_component_features(binary)
     strip_feats = _kudlit_strip_features(binary)
-    return overall_density + quadrant + fine_grid + kudlit_feats + strip_feats
+    shape_feats = _kudlit_shape_features(binary)
+    return (overall_density + quadrant + fine_grid + kudlit_feats
+            + strip_feats + shape_feats)
 
 
 def _build_feature_vector(preprocessed_img):

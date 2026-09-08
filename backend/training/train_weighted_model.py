@@ -94,10 +94,12 @@ HOG_ORIENTATIONS = 9
 HOG_PIXELS_PER_CELL = (8, 8)
 HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_BLOCK_NORM = "L2-Hys"
-# 26 = the Colab port; +2 = top/bottom kudlit-strip ink fractions (see
-# extract_spatial_features / app.py._kudlit_strip_features). app.py reads this
-# length back from the spatial scaler, so 28-feature models drop in unchanged.
-N_SPATIAL_FEATURES = 28
+# 26 = the Colab port; +2 = top/bottom kudlit-strip ink fractions;
+# +4 = top/bottom kudlit mark shape (aspect + relative width) - the dash-vs-dot
+# signal for Ne/Ni, Nu/No. See extract_spatial_features / app.py. app.py reads
+# this length back from the spatial scaler, so 28- or 32-feature models drop in
+# unchanged.
+N_SPATIAL_FEATURES = 32
 
 
 def _hog_len(target_size):
@@ -207,6 +209,32 @@ def kudlit_strip_features(binary):
             float(binary[h - strip:].sum() / total)]
 
 
+KUDLIT_SHAPE_BAND = 0.16  # top / bottom band, fraction of glyph height
+
+
+def kudlit_shape_features(binary):
+    """Shape of the mark in the top / bottom band: [top_aspect, top_relwidth,
+    bot_aspect, bot_relwidth]. A dash kudlit is wide + flat (aspect > ~2, wide
+    share of the glyph); a dot is compact (aspect ~1). Separates Ne/Ni and
+    Nu/No, which the density / position features cannot. Appended last (see
+    app.py._kudlit_shape_features - keep identical)."""
+    h, w = binary.shape
+    band = max(1, int(round(h * KUDLIT_SHAPE_BAND)))
+    cols_all = np.where(binary.sum(axis=0) > 0)[0]
+    glyph_w = float(cols_all[-1] - cols_all[0] + 1) if cols_all.size else float(w)
+
+    def strip_shape(strip):
+        cs = np.where(strip.sum(axis=0) > 0)[0]
+        rs = np.where(strip.sum(axis=1) > 0)[0]
+        if cs.size == 0 or rs.size == 0:
+            return [0.0, 0.0]
+        mw = float(cs[-1] - cs[0] + 1)
+        mh = float(rs[-1] - rs[0] + 1)
+        return [min(6.0, mw / max(1.0, mh)), min(1.5, mw / max(1.0, glyph_w))]
+
+    return strip_shape(binary[:band]) + strip_shape(binary[h - band:])
+
+
 def extract_spatial_features(pre_img):
     _, binary = cv2.threshold(pre_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
@@ -214,7 +242,9 @@ def extract_spatial_features(pre_img):
     fine_grid = grid_density_features(binary, grid_size=4)
     kudlit_feats = kudlit_component_features(binary)
     strip_feats = kudlit_strip_features(binary)
-    return overall_density + quadrant + fine_grid + kudlit_feats + strip_feats
+    shape_feats = kudlit_shape_features(binary)
+    return (overall_density + quadrant + fine_grid + kudlit_feats
+            + strip_feats + shape_feats)
 
 
 def extract_combined_features(pre_img):
@@ -605,7 +635,7 @@ def main(argv=None):
         f"  HOG: orientations={HOG_ORIENTATIONS} ppc={HOG_PIXELS_PER_CELL} "
         f"cpb={HOG_CELLS_PER_BLOCK} block_norm={HOG_BLOCK_NORM} -> {N_HOG_FEATURES}\n"
         f"  spatial: overall density(1) + 2x2 grid(4) + 4x4 grid(16) + kudlit stats(5) "
-        f"+ top/bottom strip(2) -> {N_SPATIAL_FEATURES}\n"
+        f"+ top/bottom strip(2) + kudlit mark shape(4) -> {N_SPATIAL_FEATURES}\n"
         f"  scale HOG block with hog_scaler; scale spatial block with spatial_scaler "
         f"then x {weight}; concat -> {N_FEATURES}\n"
         f"  SVC(C={C}, gamma='{SVC_GAMMA}', class_weight='balanced'); "
