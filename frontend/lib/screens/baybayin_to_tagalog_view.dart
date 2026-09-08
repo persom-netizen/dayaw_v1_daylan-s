@@ -26,6 +26,10 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
   bool _isLoading = false;
   String _status = "";
 
+  /// Chosen before capture: 'marker' (default) or 'pen'. Pen thickens thin
+  /// strokes ~1px and keeps the noise floor low so a ballpen kudlit survives.
+  String _penType = 'marker';
+
   Future<Size?> _decodeSize(Uint8List bytes) async {
     try {
       final codec = await ui.instantiateImageCodec(bytes);
@@ -48,6 +52,7 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
       null,
       'Baybayin to Tagalog',
       imageBytes: croppedBytes,
+      penType: _penType,
     );
     if (!mounted) return;
 
@@ -213,6 +218,54 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
     );
   }
 
+  Widget _penMarkerSelector() {
+    Widget seg(String value, String label, IconData icon) {
+      final on = _penType == value;
+      return GestureDetector(
+        onTap: _isLoading ? null : () => setState(() => _penType = value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+          decoration: BoxDecoration(
+            color: on ? Colors.brown.withValues(alpha: 0.12) : Colors.transparent,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+                color: on
+                    ? Colors.brown.withValues(alpha: 0.6)
+                    : Colors.grey.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: on ? Colors.brown : Colors.grey),
+              const SizedBox(width: 6),
+              Text(label,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: on ? FontWeight.w600 : FontWeight.normal,
+                      color: on ? Colors.brown : Colors.grey[700])),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        const Text("Written with",
+            style: TextStyle(fontSize: 12, color: Colors.grey)),
+        const SizedBox(height: 6),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            seg('marker', 'Marker', Icons.brush),
+            const SizedBox(width: 10),
+            seg('pen', 'Pen', Icons.edit),
+          ],
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -228,7 +281,9 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
             child: _buildImageArea(),
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+        _penMarkerSelector(),
+        const SizedBox(height: 16),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 30),
           child: Row(
