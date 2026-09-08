@@ -78,6 +78,22 @@ DERIVED_TARGET_SIZE = _cells * 8  # 1764 -> 64, 4356 -> 96
 # decision_function, which is poorly calibrated (see calibrate_model.py docstring).
 calibrated_model = load_joblib_artifact('weighted_svm_calibrated.pkl')
 
+# --- Path A: 6-class kudlit/virama "mark corrector" (optional) -----------------
+# A small separate SVM (train_mark_corrector.py) that reads ONLY the mark region.
+# It never touches the monolith's BASE letter - it only proposes a different
+# mark, and reconcile_mark() applies that ONLY when it is confident AND the
+# monolith itself was unsure. Missing files -> feature stays off, monolith
+# behaviour is byte-identical.
+mark_model = load_joblib_artifact('mark_svm.pkl')
+mark_calibrated = load_joblib_artifact('mark_svm_calibrated.pkl')
+mark_scaler = load_joblib_artifact('mark_scaler.pkl')
+MARK_CLASSES = ["none", "virama", "dot_above", "dash_above", "dot_below", "dash_below"]
+# only override the monolith when the corrector is at least this confident ...
+MARK_OVERRIDE_MIN = 0.80
+# ... and the monolith's own confidence was below this (its sure calls are ~95%+
+# right, so don't second-guess them).
+MARK_TRUST_MONO_ABOVE = 0.90
+
 # `class_names` stays a plain list so the rest of the file is unchanged: it maps
 # the SVM's integer output back to a glyph name.
 if label_encoder is not None and hasattr(label_encoder, 'classes_'):
@@ -474,13 +490,14 @@ def split_all_merged_boxes(boxes, gray, avg_width, score_fn=None):
 def drop_stray_marks(boxes, avg_height, avg_width):
     """Fold a detached diacritic box (virama "krus", e/i/o/u kudlit dot) back
     into the base glyph it belongs to instead of leaving it as a phantom
-    character. A mark sits above or below its base and shares its column; a real
-    glyph sits ON the line. Two nets:
-      1. tiny boxes (< 25% median area AND short side) - always a mark;
-      2. small-ish boxes (< 55% median area) whose centre hangs clearly out of
-         a column-neighbour's vertical band - a bold-marker virama the size
-         test alone misses (it was turning "ng" into a phantom "Ge").
-    Only a mark that overlaps no base box (a free-standing speck) is dropped."""
+    character: a tiny box (< 25% median area AND short side) that shares a
+    column with a real box is unioned into it; a tiny box overlapping no base
+    box (a free-standing speck) is dropped.
+
+    NOTE: an earlier "net 2" also folded small-ish (< 55% median) boxes that
+    hung off a neighbour's band - it ate genuinely small thin glyphs (Ha, I,
+    U): "bahay" -> "ba y". Reverted. Bold-marker viramas can still surface as a
+    phantom "Ge"; group_into_lines' line-merge keeps them off their own line."""
     if len(boxes) < 4:
         return boxes
 
@@ -504,23 +521,6 @@ def drop_stray_marks(boxes, avg_height, avg_width):
         _, _, w, h = b
         (marks if (w * h < 0.25 * median_area and min(w, h) < small_side)
          else bases).append(b)
-
-    # net 2: a small-ish box whose centre sits well outside a column-neighbour's
-    # vertical band (a real glyph shares the row; a virama hangs below it).
-    for b in list(bases):
-        x, y, w, h = b
-        if w * h >= 0.55 * median_area:
-            continue
-        bcy = y + h / 2.0
-        for other in bases:
-            if other is b or other[2] * other[3] < 0.55 * median_area:
-                continue
-            if x_overlap(b, other) < 0.35 * w:
-                continue
-            if abs(bcy - (other[1] + other[3] / 2.0)) > 0.42 * other[3]:
-                marks.append(b)
-                bases.remove(b)
-                break
 
     if not marks or not bases:
         return boxes
@@ -861,6 +861,86 @@ def classify_glyph(img64, top_k=3):
     return alternatives[0][0], alternatives[0][1], alternatives
 
 
+# --- mark corrector (Path A) -------------------------------------------------
+MARK_BAND = 0.42          # top / bottom band of the 64px glyph fed to the mark HOG
+MARK_CROP = 32
+_STANDALONE_VOWELS = {"A", "E", "I", "O", "U"}
+_MARK_FROM_TAIL = {"a": "none", "e": "dash_above", "i": "dot_above",
+                   "o": "dot_below", "u": "dash_below"}
+_MARK_TO_TAIL = {"none": "a", "dash_above": "e", "dot_above": "i",
+                 "dot_below": "o", "dash_below": "u"}
+
+
+def _split_label(name):
+    """95-class label -> (base, mark). "Ko"->("K","dot_below"), "K"->("K","virama"),
+    "Ka"->("K","none"), "Nga"->("Ng","none"), "A"->("A","none")."""
+    if name in _STANDALONE_VOWELS:
+        return name, "none"
+    low = name.lower()
+    if not any(v in low for v in "aeiou"):
+        return name, "virama"
+    return name[:-1], _MARK_FROM_TAIL[low[-1]]
+
+
+def _join_label(base, mark):
+    return base if mark == "virama" else base + _MARK_TO_TAIL[mark]
+
+
+def _mark_features(img64):
+    """Mark-region feature vector - MUST match train_mark_corrector.mark_features:
+    HOG of a 32x32 top-band crop + HOG of a 32x32 bottom-band crop + strip(2)
+    + shape(4) + component(5) = 659."""
+    _, binary = cv2.threshold(img64, 127, 255, cv2.THRESH_BINARY)
+    h = binary.shape[0]
+    band = int(round(h * MARK_BAND))
+    top = cv2.resize(img64[:band, :], (MARK_CROP, MARK_CROP), interpolation=cv2.INTER_AREA)
+    bot = cv2.resize(img64[h - band:, :], (MARK_CROP, MARK_CROP), interpolation=cv2.INTER_AREA)
+    hog_kw = dict(orientations=HOG_ORIENTATIONS, pixels_per_cell=HOG_PIXELS_PER_CELL,
+                  cells_per_block=HOG_CELLS_PER_BLOCK, block_norm=HOG_BLOCK_NORM,
+                  feature_vector=True)
+    return np.concatenate([
+        hog(top, **hog_kw), hog(bot, **hog_kw),
+        _kudlit_strip_features(binary), _kudlit_shape_features(binary),
+        _kudlit_component_features(binary),
+    ]).astype(np.float64).reshape(1, -1)
+
+
+def _read_mark(img64):
+    """(mark_name, confidence in [0,1]) from the mark corrector."""
+    feat = mark_scaler.transform(_mark_features(img64))
+    est = mark_calibrated if mark_calibrated is not None else mark_model
+    if hasattr(est, "predict_proba"):
+        proba = est.predict_proba(feat)[0]
+        i = int(np.argmax(proba))
+        return MARK_CLASSES[int(est.classes_[i])], float(proba[i])
+    return MARK_CLASSES[int(est.predict(feat)[0])], 1.0
+
+
+def reconcile_mark(img64, mono_char, mono_conf):
+    """If the mark corrector is loaded, let it override ONLY the mark of the
+    monolith's guess, and ONLY when it is confident (>= MARK_OVERRIDE_MIN) and
+    the monolith itself was unsure (< MARK_TRUST_MONO_ABOVE). Returns
+    (char, info_dict|None). Never changes the base letter."""
+    if mark_model is None or mark_scaler is None:
+        return mono_char, None
+    base, mono_mark = _split_label(mono_char)
+    if base in _STANDALONE_VOWELS or mono_conf >= MARK_TRUST_MONO_ABOVE:
+        return mono_char, None
+    try:
+        corr_mark, corr_conf = _read_mark(img64)
+    except Exception:
+        return mono_char, None
+    info = {"base": base, "mono_mark": mono_mark, "corr_mark": corr_mark,
+            "corr_conf": round(corr_conf * 100, 1), "applied": False}
+    if corr_mark == mono_mark or corr_conf < MARK_OVERRIDE_MIN:
+        return mono_char, info
+    new_char = _join_label(base, corr_mark)
+    if new_char not in class_names:
+        return mono_char, info
+    info["applied"] = True
+    return new_char, info
+
+
 class UnsupportedImageError(Exception):
     """Raised when uploaded bytes cannot be decoded to an image by any backend."""
 
@@ -1148,6 +1228,7 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
                 continue
 
             char, conf, alternatives = classify_glyph(img_final)
+            char, mark_info = reconcile_mark(img_final, char, conf)
 
             if visualize:
                 viz_tight.append(tight_roi.copy())
@@ -1171,6 +1252,8 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
                 # top-3 [name, percent] guesses, best first; the UI lets the
                 # user tap a runner-up when the top pick is wrong.
                 "alternatives": [[c, round(s * 100, 2)] for c, s in alternatives],
+                # mark-corrector trace (null unless mark_svm.pkl is loaded)
+                "mark": mark_info,
                 # layout so the client can rebuild the formatted text after edits
                 "line": line_idx,
                 "space_before": pending_space,
