@@ -383,8 +383,9 @@ def build_matrix(items, n_aug, kudlit_aug, seed, n_jobs):
     paths = np.asarray(paths)
     assert X.shape[1] == N_FEATURES, f"feature length {X.shape[1]} != {N_FEATURES}"
     print(f"built X={X.shape} in {time.time()-t0:.0f}s "
-          f"({len(items)} source images, {n_aug} augments each, "
-          f"{X.shape[0]-len(items)} augmented, "
+          f"({len(items)} source images, +{n_aug}/img global aug, "
+          f"+{kudlit_aug}/img kudlit-class aug, "
+          f"{X.shape[0]-sum(1 for b in batches if b)} augmented rows added, "
           f"{len(items)-sum(1 for b in batches if b)} unreadable/blank)")
     return X, y, paths
 
