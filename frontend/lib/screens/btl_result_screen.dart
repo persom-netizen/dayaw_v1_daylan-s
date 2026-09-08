@@ -1,7 +1,11 @@
+import 'dart:convert' show base64Decode;
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:share_plus/share_plus.dart';
 import '../services/api_service.dart';
+import '../services/result_exporter.dart';
 import '../services/scan_logger.dart';
 
 /// Full-page result for a Baybayin -> Tagalog scan: the captured image with the
@@ -30,18 +34,231 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
   bool _isArchived = false;
   bool _isProcessing = false;
 
-  /// Mutable working copy of the detections — corrections land here.
-  late final List<Map<String, dynamic>> _working;
+  /// The server response currently on screen. Replaced when the user flips the
+  /// processing-mode toggle and we re-scan the same image.
+  late Map<String, dynamic> _response;
+  String? _scanId;
 
-  int get _sessionId => (widget.response['session_id'] as num?)?.toInt() ?? 0;
+  /// White-paper mode: backend skips the noise-robustness steps (downscale,
+  /// dilation, small-object removal) that also erode thin-pen kudlit dots.
+  late bool _whitePaper;
+  bool _rescanning = false;
+
+  /// Mutable working copy of the detections — corrections land here.
+  late List<Map<String, dynamic>> _working;
+
+  /// Decoded stage previews ("what the computer sees") + which one is shown.
+  Map<String, Uint8List> _stages = {};
+  String _view = '2_flattened'; // default to a processed frame, not the raw capture
+
+  /// Full ordered pipeline walkthrough, fetched on demand.
+  List<Map<String, dynamic>> _vizCards = [];
+  bool _vizLoading = false;
+  bool _vizLoaded = false;
+  bool _saving = false;
+
+  static const _stageLabels = {
+    '0_raw': 'Raw',
+    '1_normalized': 'Normalized',
+    '2_flattened': 'Flattened',
+    '3_binary': 'Binary',
+    '4_grouped': 'Grouped',
+  };
+  static const _stageHints = {
+    '0_raw': 'Your capture, as sent.',
+    '1_normalized': 'Resized to the working width.',
+    '2_flattened': 'Lighting removed — what Otsu thresholds. Boxes sit on this frame.',
+    '3_binary': 'Pure black/white — what findContours traces.',
+    '4_grouped': 'After dilation / proximity-merge — one blob per glyph.',
+  };
+
+  int get _sessionId => (_response['session_id'] as num?)?.toInt() ?? 0;
 
   @override
   void initState() {
     super.initState();
-    _working = (widget.response['individual_detections'] as List? ?? [])
-        .whereType<Map>()
-        .map((d) => Map<String, dynamic>.from(d))
-        .toList();
+    _response = widget.response;
+    _scanId = widget.scanId;
+    _whitePaper = _response['white_paper'] == true;
+    _working = _detectionsFrom(_response);
+    _decodeStages(_response);
+    _hydrateViz(_response);
+  }
+
+  void _hydrateViz(Map<String, dynamic> resp) {
+    final raw = resp['visualize_b64'];
+    if (raw is List && raw.isNotEmpty) {
+      _vizCards = raw.whereType<Map>().map((m) {
+        final card = Map<String, dynamic>.from(m);
+        final img = card['img'];
+        if (img is String && img.isNotEmpty) {
+          try {
+            card['bytes'] = base64Decode(img);
+          } catch (_) {}
+        }
+        return card;
+      }).toList();
+      _vizLoaded = _vizCards.isNotEmpty;
+    }
+  }
+
+  Future<void> _saveResults() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (!_vizLoaded && !_vizLoading) await _loadViz();
+      if (!mounted) return;
+
+      final proc = _response['processed_size'];
+      final pw = (proc is List && proc.isNotEmpty) ? (proc[0] as num).toInt() : 0;
+      final ph =
+          (proc is List && proc.length > 1) ? (proc[1] as num).toInt() : 0;
+      final shown = _shown;
+
+      final payload = ExportPayload(
+        heading: 'DAYAW  -  Baybayin to Latin',
+        timestamp: DateTime.now().toString().split('.').first,
+        title: _resultText,
+        plain: _plainResult.replaceAll('\n', '   '),
+        statLines: [
+          'Detected characters: ${shown.length}',
+          'Average confidence: ${_average.toStringAsFixed(1)}%',
+          'Scan confidence: '
+              '${(_response['confidence'] as num? ?? 0).toStringAsFixed(1)}%',
+          'Processing mode: ${_whitePaper ? 'white-paper' : 'standard'}',
+        ],
+        processed: _stages['2_flattened'],
+        procW: pw,
+        procH: ph,
+        boxesPx: _working.map<List<int>>((d) {
+          final b = d['bbox_px'];
+          return (b is List && b.length >= 4)
+              ? [
+                  (b[0] as num).toInt(),
+                  (b[1] as num).toInt(),
+                  (b[2] as num).toInt(),
+                  (b[3] as num).toInt(),
+                ]
+              : <int>[];
+        }).toList(),
+        boxLabels: _working.map((d) => d['char']?.toString() ?? '').toList(),
+        viz: _vizCards
+            .where((c) => c['bytes'] is Uint8List)
+            .map((c) => ExportVizCard(
+                  part: c['part']?.toString() ?? '',
+                  title: c['title']?.toString() ?? '',
+                  caption: c['caption']?.toString() ?? '',
+                  bytes: c['bytes'] as Uint8List,
+                ))
+            .toList(),
+      );
+
+      final bytes = await compute(buildResultSheet, payload);
+      if (!mounted) return;
+      final name = 'dayaw_scan_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await Share.shareXFiles(
+        [XFile.fromData(bytes, name: name, mimeType: 'image/jpeg')],
+        text: 'Dayaw scan result',
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+          SnackBar(content: Text('Could not save: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _loadViz() async {
+    if (_vizLoading || _vizLoaded) return;
+    setState(() => _vizLoading = true);
+    final resp = await ApiService().uploadAndTranslateDetailed(
+      null,
+      'Baybayin to Tagalog',
+      imageBytes: widget.imageBytes,
+      whitePaper: _whitePaper,
+      visualize: true,
+    );
+    if (!mounted) return;
+    if (resp == null) {
+      setState(() => _vizLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Could not load the visualization."),
+          duration: Duration(seconds: 2)));
+      return;
+    }
+    setState(() {
+      _hydrateViz(resp);
+      _vizLoading = false;
+    });
+  }
+
+  void _decodeStages(Map<String, dynamic> resp) {
+    final out = <String, Uint8List>{};
+    final s = resp['stages_b64'];
+    if (s is Map) {
+      s.forEach((k, v) {
+        if (v is String && v.isNotEmpty) {
+          try {
+            out[k.toString()] = base64Decode(v);
+          } catch (_) {}
+        }
+      });
+    }
+    _stages = out;
+    if (!_stages.containsKey(_view)) {
+      _view = _stages.containsKey('2_flattened')
+          ? '2_flattened'
+          : (_stages.isEmpty ? '0_raw' : _stages.keys.first);
+    }
+  }
+
+  /// Size of the frame the bbox coords refer to (the flattened stage).
+  Size get _procSize {
+    final p = _response['processed_size'];
+    if (p is List && p.length >= 2) {
+      return Size((p[0] as num).toDouble(), (p[1] as num).toDouble());
+    }
+    return widget.imageSize ?? Size.infinite;
+  }
+
+  List<Map<String, dynamic>> _detectionsFrom(Map<String, dynamic> resp) =>
+      (resp['individual_detections'] as List? ?? [])
+          .whereType<Map>()
+          .map((d) => Map<String, dynamic>.from(d))
+          .toList();
+
+  Future<void> _rescan(bool whitePaper) async {
+    if (_rescanning) return;
+    setState(() {
+      _rescanning = true;
+      _whitePaper = whitePaper;
+    });
+    final resp = await ApiService().uploadAndTranslateDetailed(
+      null,
+      'Baybayin to Tagalog',
+      imageBytes: widget.imageBytes,
+      whitePaper: whitePaper,
+    );
+    if (!mounted) return;
+    if (resp == null) {
+      setState(() => _rescanning = false);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text("Re-scan failed — check the connection."),
+          duration: Duration(seconds: 2)));
+      return;
+    }
+    final newId = await ScanLogger.instance
+        .logScan(imageBytes: widget.imageBytes, response: resp);
+    if (!mounted) return;
+    setState(() {
+      _response = resp;
+      _scanId = newId;
+      _working = _detectionsFrom(resp);
+      _decodeStages(resp);
+      _isArchived = false;
+      _rescanning = false;
+    });
   }
 
   bool _visible(Map<String, dynamic> d) =>
@@ -154,7 +371,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
       d['confidence'] = match[1] == 0.0 ? 100.0 : match[1];
     });
     ScanLogger.instance.logCorrection(
-      scanId: widget.scanId,
+      scanId: _scanId,
       index: _working.indexOf(d),
       from: from,
       to: chosen,
@@ -220,36 +437,29 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.brown,
         elevation: 1,
+        actions: [
+          _saving
+              ? const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: Colors.brown),
+                  ),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.save_alt),
+                  tooltip: "Save scanned results (JPG)",
+                  onPressed: _saveResults,
+                ),
+        ],
       ),
       body: Column(
         children: [
-          // --- captured image + detection boxes (pinch to zoom) ---
-          Container(
-            height: imgH,
-            width: double.infinity,
-            color: const Color(0xFFEDEDED),
-            child: InteractiveViewer(
-              maxScale: 5,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  Center(
-                    child: Image.memory(widget.imageBytes, fit: BoxFit.contain),
-                  ),
-                  Positioned.fill(
-                    child: IgnorePointer(
-                      child: CustomPaint(
-                        painter: DetectionOverlayPainter(
-                          _working,
-                          widget.imageSize ?? Size.infinite,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
+          // --- stage preview ("what the computer sees") + detection boxes ---
+          _stageViewer(imgH),
+          _stagePicker(),
           const Divider(height: 1),
 
           // --- results ---
@@ -259,6 +469,32 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (_response['capture_warning'] is String) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Colors.amber[50],
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.amber[300]!),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.warning_amber_rounded,
+                              size: 18, color: Colors.amber[800]),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _response['capture_warning'] as String,
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   const Text("Translation Result",
                       style:
                           TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
@@ -295,7 +531,34 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                       ],
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  _modeToggle(),
+                  const SizedBox(height: 8),
+                  _visualizeSection(),
                   const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _saving ? null : _saveResults,
+                      icon: _saving
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: Colors.brown))
+                          : const Icon(Icons.save_alt, size: 18),
+                      label: Text(_saving
+                          ? "Rendering…"
+                          : "Save scanned results (JPG)"),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.brown,
+                        side: BorderSide(
+                            color: Colors.brown.withValues(alpha: 0.5)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   const Text("Tap any character below to fix a wrong reading.",
                       style: TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 14),
@@ -303,7 +566,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                   _statRow("Average Confidence:",
                       "${_average.toStringAsFixed(1)}%"),
                   _statRow("Scan Confidence:",
-                      "${(widget.response['confidence'] as num? ?? 0).toStringAsFixed(1)}%"),
+                      "${(_response['confidence'] as num? ?? 0).toStringAsFixed(1)}%"),
                   if (correctedCount > 0)
                     _statRow("Corrected by you:", "$correctedCount"),
                   const Divider(height: 32),
@@ -392,6 +655,234 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                 style: TextStyle(fontSize: 10, color: border)),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _stageViewer(double h) {
+    final raw = _view == '0_raw' || _stages.isEmpty;
+    final bytes =
+        raw ? widget.imageBytes : (_stages[_view] ?? widget.imageBytes);
+    final overlaySize = raw ? (widget.imageSize ?? Size.infinite) : _procSize;
+    return Container(
+      height: h,
+      width: double.infinity,
+      color: const Color(0xFFEDEDED),
+      child: InteractiveViewer(
+        maxScale: 5,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Center(
+              child: Image.memory(bytes,
+                  fit: BoxFit.contain, gaplessPlayback: true),
+            ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: CustomPaint(
+                  painter: DetectionOverlayPainter(_working, overlaySize),
+                ),
+              ),
+            ),
+            if (_rescanning)
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: Color(0x22000000),
+                  child: Center(
+                      child: CircularProgressIndicator(color: Colors.brown)),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _stagePicker() {
+    if (_stages.isEmpty) return const SizedBox.shrink();
+    final keys = _stages.keys.toList()..sort();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+      color: const Color(0xFFF7F7F7),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final k in keys)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(_stageLabels[k] ?? k,
+                          style: const TextStyle(fontSize: 12)),
+                      selected: _view == k,
+                      selectedColor: Colors.brown.withValues(alpha: 0.18),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (_) => setState(() => _view = k),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            _stageHints[_view] ?? "What the computer sees at this stage.",
+            style: const TextStyle(fontSize: 10.5, color: Colors.grey),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _visualizeSection() {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.brown.withValues(alpha: 0.25)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+          childrenPadding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+          leading: const Icon(Icons.blur_on, color: Colors.brown, size: 20),
+          title: const Text("Visualize process",
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          subtitle: const Text("Every step, from raw image to model prediction",
+              style: TextStyle(fontSize: 11, color: Colors.grey)),
+          onExpansionChanged: (open) {
+            if (open && !_vizLoaded && !_vizLoading) _loadViz();
+          },
+          children: [
+            if (_vizLoading)
+              const Padding(
+                padding: EdgeInsets.all(20),
+                child: Column(children: [
+                  CircularProgressIndicator(color: Colors.brown),
+                  SizedBox(height: 10),
+                  Text("Rendering the pipeline…",
+                      style: TextStyle(fontSize: 12, color: Colors.grey)),
+                ]),
+              )
+            else if (_vizCards.isEmpty)
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text("No visualization available.",
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+              )
+            else
+              ..._buildVizCards(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildVizCards() {
+    final widgets = <Widget>[];
+    String? part;
+    for (final c in _vizCards) {
+      final p = c['part']?.toString() ?? '';
+      if (p != part) {
+        part = p;
+        widgets.add(Padding(
+          padding: const EdgeInsets.fromLTRB(2, 12, 2, 6),
+          child: Text(p.toUpperCase(),
+              style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.brown,
+                  letterSpacing: 0.5)),
+        ));
+      }
+      final bytes = c['bytes'];
+      widgets.add(Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(c['title']?.toString() ?? '',
+                style: const TextStyle(
+                    fontSize: 12.5, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 4),
+            if (bytes is Uint8List)
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: InteractiveViewer(
+                  maxScale: 6,
+                  child: Container(
+                    color: const Color(0xFFECECEC),
+                    width: double.infinity,
+                    child: Image.memory(bytes, fit: BoxFit.contain),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 4),
+            Text(c['caption']?.toString() ?? '',
+                style: const TextStyle(fontSize: 11, color: Colors.grey)),
+          ],
+        ),
+      ));
+    }
+    return widgets;
+  }
+
+  Widget _modeToggle() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+      decoration: BoxDecoration(
+        color: _whitePaper ? Colors.brown.withValues(alpha: 0.06) : Colors.grey[100],
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: _whitePaper
+                ? Colors.brown.withValues(alpha: 0.4)
+                : Colors.grey.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.description_outlined, size: 18, color: Colors.brown),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text("White-paper mode",
+                        style: TextStyle(
+                            fontSize: 13, fontWeight: FontWeight.w600)),
+                    if (_rescanning) ...[
+                      const SizedBox(width: 8),
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.brown),
+                      ),
+                    ],
+                  ],
+                ),
+                Text(
+                  _rescanning
+                      ? "Re-scanning this image…"
+                      : (_whitePaper
+                          ? "Keeps thin-pen marks. Re-scan of the same image."
+                          : "Standard pipeline. Flip to re-scan without noise cleanup."),
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: _whitePaper,
+            activeThumbColor: Colors.brown,
+            onChanged: _rescanning ? null : (v) => _rescan(v),
+          ),
+        ],
       ),
     );
   }

@@ -24,12 +24,16 @@ class ApiService {
     String mode, {
     String? text,
     Uint8List? imageBytes,
+    bool whitePaper = false,
+    bool visualize = false,
   }) async {
     try {
       final uri = Uri.parse('$_baseUrl/api/translate');
       final request = http.MultipartRequest('POST', uri);
 
       request.fields['mode'] = mode;
+      request.fields['white_paper'] = whitePaper.toString();
+      request.fields['visualize'] = visualize.toString();
 
       if (mode == 'Tagalog to Baybayin' && text != null) {
         request.fields['text'] = text;

@@ -5,6 +5,7 @@ import mysql.connector
 import os
 import uuid
 import re
+import base64
 from io import BytesIO
 from pathlib import Path
 from flask import Flask, request, jsonify
@@ -202,11 +203,14 @@ MIN_SEGMENT_WIDTH_RATIO = 0.55
 BG_BLUR_KERNEL = 101
 
 
-def normalize_image_size(img, standard_width=STANDARD_WIDTH):
+def normalize_image_size(img, standard_width=STANDARD_WIDTH, upscale_only=False):
     h, w = img.shape[:2]
+    if upscale_only and w >= standard_width:
+        return img  # white-paper mode: never shrink a photo (keeps kudlit detail)
     scale = standard_width / w
     new_h = int(h * scale)
-    return cv2.resize(img, (standard_width, new_h), interpolation=cv2.INTER_AREA)
+    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+    return cv2.resize(img, (standard_width, new_h), interpolation=interp)
 
 
 def deskew_image(img):
@@ -274,10 +278,48 @@ def measure_average_char_size(gray):
     return avg_height, avg_width
 
 
-def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX):
-    img = normalize_image_size(img)
+def merge_by_proximity(boxes, avg_width, avg_height,
+                       x_gap_ratio=H_DILATE_RATIO, y_gap_ratio=V_DILATE_RATIO):
+    """Non-destructive stand-in for morphological dilation (white-paper mode).
+
+    Union two boxes when their bounding rects nearly touch AND share a column -
+    i.e. a kudlit / virama sitting above or below its body, or a broken cursive
+    stroke - without altering a single pixel, so the glyph shape the classifier
+    sees is exactly what was on the paper. Iterates to a fixed point."""
+    boxes = [list(b) for b in boxes]
+    x_gap = x_gap_ratio * avg_width
+    y_gap = y_gap_ratio * avg_height
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                ax, ay, aw, ah = boxes[i]
+                bx, by, bw, bh = boxes[j]
+                dx = max(ax, bx) - min(ax + aw, bx + bw)   # >0 => horizontal gap
+                dy = max(ay, by) - min(ay + ah, by + bh)   # >0 => vertical gap
+                x_overlap = min(ax + aw, bx + bw) - max(ax, bx)
+                if dx <= x_gap and dy <= y_gap and x_overlap > -0.25 * avg_width:
+                    nx0, ny0 = min(ax, bx), min(ay, by)
+                    nx1, ny1 = max(ax + aw, bx + bw), max(ay + ah, by + bh)
+                    boxes[i] = [nx0, ny0, nx1 - nx0, ny1 - ny0]
+                    boxes.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+    return [tuple(b) for b in boxes]
+
+
+def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX, white_paper=False,
+                           stages=None):
+    img = normalize_image_size(img, upscale_only=white_paper)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if stages is not None:
+        stages["1_normalized"] = img.copy()
     gray = flatten_background(gray)  # normalise lighting before any thresholding
+    if stages is not None:
+        stages["2_flattened"] = gray.copy()
     h_img, w_img = gray.shape
 
     avg_height, avg_width = measure_average_char_size(gray)
@@ -291,15 +333,29 @@ def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX):
         avg_width = 60
 
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_dilate, v_dilate))
-    dilated = cv2.dilate(thresh, kernel, iterations=1)
+    if white_paper:
+        # no pixel-fattening: contour the clean threshold as-is, then glue
+        # kudlit/virama to their body by proximity afterwards.
+        source = thresh
+    else:
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_dilate, v_dilate))
+        source = cv2.dilate(thresh, kernel, iterations=1)
+    if stages is not None:
+        stages["3_binary"] = thresh.copy()
+        stages["4_grouped"] = source.copy()  # dilated, or raw threshold in white-paper mode
 
     min_area = MIN_CHAR_AREA_RATIO * h_img * w_img
     min_box_height = avg_height * MIN_BOX_HEIGHT_RATIO
     min_box_width = avg_width * MIN_BOX_WIDTH_RATIO
     min_box_area = (avg_width * avg_height) * MIN_BOX_AREA_RATIO
+    if white_paper:
+        # a lone kudlit dot / virama is a real box here (no dilation glued it
+        # on yet), so don't let the size filters delete it before the merge
+        min_box_height *= 0.35
+        min_box_width *= 0.35
+        min_box_area *= 0.12
 
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(source, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     boxes = []
     for c in contours:
         if cv2.contourArea(c) <= min_area:
@@ -321,6 +377,9 @@ def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX):
             continue
 
         boxes.append((x, y, w, h))
+
+    if white_paper:
+        boxes = merge_by_proximity(boxes, avg_width, avg_height)
 
     return boxes, gray, img, avg_height, avg_width
 
@@ -414,29 +473,20 @@ def split_all_merged_boxes(boxes, gray, avg_width, score_fn=None):
 
 def drop_stray_marks(boxes, avg_height, avg_width):
     """Fold a detached diacritic box (virama "krus", e/i/o/u kudlit dot) back
-    into the base glyph it belongs to instead of dropping it.
-
-    A kudlit / virama sits directly above or below its base, so its x-range
-    overlaps that base's. When the adaptive dilation fails to bridge the gap the
-    mark lands in its own tiny contour - the old behaviour deleted it, which
-    turned "no" into "na" and "n" into "na". Here we union each tiny box into
-    the nearest base box that shares its column; only a mark that overlaps no
-    base box (a genuine free-standing speck) is dropped."""
+    into the base glyph it belongs to instead of leaving it as a phantom
+    character. A mark sits above or below its base and shares its column; a real
+    glyph sits ON the line. Two nets:
+      1. tiny boxes (< 25% median area AND short side) - always a mark;
+      2. small-ish boxes (< 55% median area) whose centre hangs clearly out of
+         a column-neighbour's vertical band - a bold-marker virama the size
+         test alone misses (it was turning "ng" into a phantom "Ge").
+    Only a mark that overlaps no base box (a free-standing speck) is dropped."""
     if len(boxes) < 4:
         return boxes
 
     areas = sorted(w * h for (_, _, w, h) in boxes)
     median_area = areas[len(areas) // 2]
     small_side = 0.66 * min(avg_width, avg_height)
-
-    marks, bases = [], []
-    for b in boxes:
-        _, _, w, h = b
-        (marks if (w * h < 0.25 * median_area and min(w, h) < small_side)
-         else bases).append(b)
-
-    if not marks or not bases:
-        return boxes
 
     def x_overlap(a, b):
         return max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
@@ -449,11 +499,37 @@ def drop_stray_marks(boxes, avg_height, avg_width):
             return my0 - by1
         return 0
 
+    marks, bases = [], []
+    for b in boxes:
+        _, _, w, h = b
+        (marks if (w * h < 0.25 * median_area and min(w, h) < small_side)
+         else bases).append(b)
+
+    # net 2: a small-ish box whose centre sits well outside a column-neighbour's
+    # vertical band (a real glyph shares the row; a virama hangs below it).
+    for b in list(bases):
+        x, y, w, h = b
+        if w * h >= 0.55 * median_area:
+            continue
+        bcy = y + h / 2.0
+        for other in bases:
+            if other is b or other[2] * other[3] < 0.55 * median_area:
+                continue
+            if x_overlap(b, other) < 0.35 * w:
+                continue
+            if abs(bcy - (other[1] + other[3] / 2.0)) > 0.42 * other[3]:
+                marks.append(b)
+                bases.remove(b)
+                break
+
+    if not marks or not bases:
+        return boxes
+
     merged = list(bases)
     for m in marks:
         cand = [i for i, base in enumerate(merged)
-                if x_overlap(m, base) >= 0.5 * m[2]
-                and v_gap(m, base) < 1.2 * avg_height]
+                if x_overlap(m, base) >= 0.35 * m[2]
+                and v_gap(m, base) < 1.3 * avg_height]
         if not cand:
             continue  # free-standing speck -> drop
         j = min(cand, key=lambda i: v_gap(m, merged[i]))
@@ -485,7 +561,20 @@ def group_into_lines(boxes, avg_height, row_ratio=ROW_GROUPING_RATIO):
         if not placed:
             lines.append([box])
 
-    lines.sort(key=lambda line: np.mean([b[1] for b in line]))
+    # merge lines whose vertical bands overlap - small or wavy writing otherwise
+    # fragments one physical row into several (pilipino x4: 4 rows -> 15).
+    def _cy(ln):
+        return float(np.median([b[1] + b[3] / 2 for b in ln]))
+
+    lines.sort(key=_cy)
+    fused = []
+    for line in lines:
+        if fused and abs(_cy(line) - _cy(fused[-1])) < avg_height * 0.9:
+            fused[-1].extend(line)
+        else:
+            fused.append(line)
+    lines = fused
+
     for line in lines:
         line.sort(key=lambda b: b[0])
 
@@ -493,15 +582,33 @@ def group_into_lines(boxes, avg_height, row_ratio=ROW_GROUPING_RATIO):
 
 
 def insert_word_breaks(line_boxes, avg_width, word_gap_ratio=WORD_GAP_RATIO):
+    """Split a line into words. A fixed `word_gap_ratio * avg_width` cut can't fit
+    every hand at once (0.78 merged "sa labas"; lower it and "salamat" splits).
+    So we also read THIS line's own gap distribution: within-word gaps cluster
+    small, word gaps sit above the widest ratio-jump in the sorted gaps. The
+    adaptive threshold can only lower the fixed one, never raise it, and is
+    floored so a faint jump can't over-split."""
     if len(line_boxes) < 2:
         return line_boxes
 
-    gap_threshold = avg_width * word_gap_ratio
-    result = [line_boxes[0]]
+    gaps = []
     for i in range(1, len(line_boxes)):
         prev_right = line_boxes[i - 1][0] + line_boxes[i - 1][2]
-        gap = line_boxes[i][0] - prev_right
-        if gap > gap_threshold:
+        gaps.append(max(0.0, line_boxes[i][0] - prev_right))
+
+    threshold = avg_width * word_gap_ratio
+    if len(gaps) >= 3:
+        ordered = sorted(gaps)
+        best_ratio, split_at = 1.0, None
+        for lo, hi in zip(ordered, ordered[1:]):
+            if hi >= 0.30 * avg_width and lo > 1e-6 and hi / lo > best_ratio:
+                best_ratio, split_at = hi / lo, 0.5 * (lo + hi)
+        if split_at is not None and best_ratio >= 1.8:
+            threshold = min(threshold, max(split_at, 0.30 * avg_width))
+
+    result = [line_boxes[0]]
+    for i in range(1, len(line_boxes)):
+        if gaps[i - 1] > threshold:
             result.append(None)
         result.append(line_boxes[i])
     return result
@@ -523,14 +630,21 @@ HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_BLOCK_NORM = 'L2-Hys'
 
 
-def _tight_box_from_gray(gray_patch):
+def _despeckle(binary, min_noise_size):
+    """remove_small_objects, but a no-op when min_noise_size <= 0 (white-paper
+    mode keeps every ink blob so a thin-pen kudlit dot is never erased)."""
+    if not min_noise_size or min_noise_size <= 0:
+        return binary
+    return (remove_small_objects(binary > 0, min_size=min_noise_size) * 255).astype(np.uint8)
+
+
+def _tight_box_from_gray(gray_patch, min_noise_size=MIN_NOISE_SIZE):
     """Return the tight ink-bounds inside a grayscale patch, in patch-local coords."""
     if gray_patch is None or gray_patch.size == 0:
         return None
 
     _, binary = cv2.threshold(gray_patch, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    cleaned_bool = remove_small_objects(binary > 0, min_size=MIN_NOISE_SIZE)
-    cleaned = (cleaned_bool * 255).astype(np.uint8)
+    cleaned = _despeckle(binary, min_noise_size)
     if cleaned.sum() == 0:
         return None
 
@@ -556,12 +670,11 @@ def _prepare_character_crop(gray_patch, target_size=TARGET_SIZE,
         return None
 
     _, binary = cv2.threshold(gray_patch, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    cleaned_bool = remove_small_objects(binary > 0, min_size=min_noise_size)
-    cleaned = (cleaned_bool * 255).astype(np.uint8)
+    cleaned = _despeckle(binary, min_noise_size)
     if cleaned.sum() == 0:
         return None
 
-    tight = _tight_box_from_gray(gray_patch)
+    tight = _tight_box_from_gray(gray_patch, min_noise_size=min_noise_size)
     if tight is None:
         return None
 
@@ -747,7 +860,7 @@ def _decode_image_bytes(image_bytes):
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
-def _score_gray_crop(gray_patch):
+def _score_gray_crop(gray_patch, min_noise_size=MIN_NOISE_SIZE):
     """A "looks like one clean glyph" score for `gray_patch`, used only to
     arbitrate box splits (resolve_merge_or_split).
 
@@ -756,7 +869,7 @@ def _score_gray_crop(gray_patch):
     top margin, whereas the isotonic calibration would report it at ~0.95 and
     wrongly keep the merge.
     """
-    crop = _prepare_character_crop(gray_patch)
+    crop = _prepare_character_crop(gray_patch, min_noise_size=min_noise_size)
     if crop is None:
         return -1e9
     try:
@@ -774,22 +887,155 @@ def _titlecase_words(text):
     return " ".join(w[:1].upper() + w[1:].lower() for w in text.split())
 
 
-def preprocess_and_predict(image_bytes, session_id):
+def _encode_stage(img, max_w=1100, quality=72):
+    """ndarray (grayscale or BGR) -> base64 JPEG string for the debug viewer,
+    downscaled so the whole stage strip stays a sensible payload."""
+    if img is None or getattr(img, "size", 0) == 0:
+        return None
+    h, w = img.shape[:2]
+    if w > max_w:
+        img = cv2.resize(img, (max_w, max(1, int(h * max_w / w))),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    return base64.b64encode(buf).decode("ascii") if ok else None
+
+
+def _montage(tiles, cols=10, cell=84, labels=None):
+    """Grid of same-content tiles (each resized to `cell`) for the Visualize
+    Process view - the per-glyph crops, HOG maps, predictions."""
+    if not tiles:
+        return None
+    lab_h = 16 if labels else 0
+    rows = (len(tiles) + cols - 1) // cols
+    pad = 4
+    W = cols * (cell + pad) + pad
+    H = rows * (cell + lab_h + pad) + pad
+    canvas = np.full((H, W, 3), 255, np.uint8)
+    for i, t in enumerate(tiles):
+        if t is None:
+            continue
+        if t.ndim == 2:
+            t = cv2.cvtColor(t, cv2.COLOR_GRAY2BGR)
+        t = cv2.resize(t, (cell, cell), interpolation=cv2.INTER_NEAREST)
+        r, c = divmod(i, cols)
+        y0 = pad + r * (cell + lab_h + pad)
+        x0 = pad + c * (cell + pad)
+        canvas[y0:y0 + cell, x0:x0 + cell] = t
+        if labels and i < len(labels) and labels[i]:
+            cv2.putText(canvas, str(labels[i])[:12], (x0, y0 + cell + 12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 180), 1)
+    return canvas
+
+
+def _boxes_overlay(gray, box_groups):
+    """gray frame -> BGR with boxes drawn. box_groups: list of (boxes, color)."""
+    vis = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    for boxes, color in box_groups:
+        for (x, y, w, h) in boxes:
+            cv2.rectangle(vis, (int(x), int(y)), (int(x + w), int(y + h)), color, 3)
+    return vis
+
+
+def preprocess_and_predict(image_bytes, session_id, white_paper=False,
+                           visualize=False):
     img = _decode_image_bytes(image_bytes)  # raises UnsupportedImageError
 
+    # White-paper mode: the background is guaranteed clean, so skip the steps
+    # that trade detail for noise-robustness - no downscaling, no morphological
+    # dilation (merge boxes by proximity instead), no remove_small_objects
+    # (which eats thin-pen kudlit dots). See detect_character_boxes / _despeckle.
+    mns = 0 if white_paper else MIN_NOISE_SIZE
+
+    stage_imgs = {"0_raw": img.copy()}
     img, deskew_angle = deskew_image(img)
-    boxes, gray, _, avg_height, avg_width = detect_character_boxes(img)
+    stage_imgs["0b_deskewed"] = img.copy()
+    boxes, gray, _, avg_height, avg_width = detect_character_boxes(
+        img, white_paper=white_paper, stages=stage_imgs)
     proc_h, proc_w = gray.shape[:2]
+    # base64 previews so the app can show WHAT THE COMPUTER SEES at each stage,
+    # not the raw capture. The bbox coords in `detections` are in the
+    # "2_flattened" frame's pixel space (same as processed_size).
+    stages_b64 = {k: _encode_stage(stage_imgs[k]) for k in sorted(stage_imgs)}
+    # Below ~70px/glyph in the 1600-wide working frame the whole pipeline frays
+    # (phantom boxes, over-splits, kudlits gone). Warn the user to shoot closer.
+    capture_warning = None
+    if avg_width and avg_width < 70:
+        capture_warning = (
+            f"Small capture - glyphs are about {int(avg_width)}px wide. Hold the "
+            "camera closer or crop tighter (aim for 90px+); segmentation and "
+            "kudlit detection degrade sharply below ~70px.")
     meta = {"processed_size": [int(proc_w), int(proc_h)],
-            "deskew_angle": round(float(deskew_angle), 3)}
+            "deskew_angle": round(float(deskew_angle), 3),
+            "white_paper": bool(white_paper),
+            "avg_glyph_px": [int(avg_width or 0), int(avg_height or 0)],
+            "capture_warning": capture_warning,
+            "processed_b64": stages_b64.get("2_flattened"),
+            "stages_b64": stages_b64}
+
+    # Ordered "Visualize Process" strip: one card per pipeline step.
+    viz = [] if visualize else None
+
+    def _viz(part, title, caption, image):
+        if viz is not None:
+            viz.append({"part": part, "title": title, "caption": caption,
+                        "img": _encode_stage(image, max_w=1000, quality=62)})
+
+    _viz("PART 1 - find the glyphs", "1. normalize_image_size",
+         f"Whole photo resized to a {proc_w}px working width so every "
+         "ratio-based threshold below is predictable.", stage_imgs.get("1_normalized"))
+    _viz("PART 1 - find the glyphs", "2. deskew_image",
+         f"Rotated by {meta['deskew_angle']} deg (only corrects 0.3-20 deg).",
+         stage_imgs.get("0b_deskewed"))
+    _viz("PART 1 - find the glyphs", "3. flatten_background",
+         "Divide by a blurred copy of itself: shadows / off-white paper gone. "
+         "This is what Otsu thresholds; the boxes are measured on this frame.",
+         stage_imgs.get("2_flattened"))
+    _viz("PART 1 - find the glyphs", "4. Otsu threshold -> binary",
+         "One black/white cutoff. This exact pixel set is what findContours traces.",
+         stage_imgs.get("3_binary"))
+    _viz("PART 1 - find the glyphs",
+         "5. " + ("merge-by-proximity" if white_paper else "dilate"),
+         ("White-paper mode: boxes grouped by gap, no pixels changed."
+          if white_paper else
+          f"Ink fattened by ~{int(avg_width * H_DILATE_RATIO)}x"
+          f"{int(avg_height * V_DILATE_RATIO)}px so a glyph + its kudlit + its "
+          "virama fuse into one blob."),
+         stage_imgs.get("4_grouped"))
+    _viz("PART 1 - find the glyphs", "6. findContours + size / border filters",
+         f"{len(boxes)} boxes survive (avg glyph {avg_width}x{avg_height}px).",
+         _boxes_overlay(gray, [(boxes, (0, 0, 230))]) if visualize else None)
 
     if not boxes:
+        if viz is not None:
+            meta["visualize_b64"] = viz
         return "No characters detected", 0.0, [], meta
 
-    boxes = split_all_merged_boxes(boxes, gray, avg_width, score_fn=_score_gray_crop)
+    boxes_before_split = list(boxes)
+    boxes = split_all_merged_boxes(
+        boxes, gray, avg_width,
+        score_fn=lambda p: _score_gray_crop(p, min_noise_size=mns))
+    _viz("PART 1 - find the glyphs", "7. split_all_merged_boxes",
+         f"Boxes wider than {SPLIT_WIDTH_RATIO}x avg are cut at an ink valley if "
+         f"the classifier likes both halves. {len(boxes_before_split)} -> {len(boxes)}.",
+         _boxes_overlay(gray, [(boxes, (0, 0, 230))]) if visualize else None)
+
     boxes = drop_stray_marks(boxes, avg_height, avg_width)
+    _viz("PART 1 - find the glyphs", "8. drop_stray_marks",
+         f"A detached kudlit / virama box is folded into its glyph. -> {len(boxes)} boxes.",
+         _boxes_overlay(gray, [(boxes, (0, 150, 0))]) if visualize else None)
+
     lines = group_into_lines(boxes, avg_height)
+    if visualize and lines:
+        palette = [(0, 0, 230), (0, 150, 0), (200, 120, 0), (170, 0, 170),
+                   (0, 160, 200), (120, 90, 0)]
+        _viz("PART 1 - find the glyphs", "9. group_into_lines + insert_word_breaks",
+             f"{len(lines)} line(s). A gap wider than {WORD_GAP_RATIO}x avg width "
+             "becomes a space.",
+             _boxes_overlay(gray, [(ln, palette[i % len(palette)])
+                                   for i, ln in enumerate(lines)]))
     if not lines:
+        if viz is not None:
+            meta["visualize_b64"] = viz
         return "No characters detected", 0.0, [], meta
 
     # Isotonic-calibrated proba is well-scaled but weakly discriminative, so a
@@ -803,6 +1049,10 @@ def preprocess_and_predict(image_bytes, session_id):
 
     session_temp_dir = os.path.join(TEMP_ROOT, f"session_{session_id}")
     os.makedirs(session_temp_dir, exist_ok=True)
+
+    viz_tight = []      # raw ROI per glyph (PART 2 input)
+    viz_crops = []      # final 64x64 per glyph (model input)
+    viz_labels = []     # "<char> <conf>%"
 
     crop_index = 0
     for line_idx, line in enumerate(lines):
@@ -820,7 +1070,7 @@ def preprocess_and_predict(image_bytes, session_id):
             if roi_gray.size == 0:
                 continue
 
-            ink_bounds = _tight_box_from_gray(roi_gray)
+            ink_bounds = _tight_box_from_gray(roi_gray, min_noise_size=mns)
             if ink_bounds is None:
                 continue
 
@@ -829,11 +1079,16 @@ def preprocess_and_predict(image_bytes, session_id):
             if tight_roi.size == 0:
                 continue
 
-            img_final = _prepare_character_crop(tight_roi)
+            img_final = _prepare_character_crop(tight_roi, min_noise_size=mns)
             if img_final is None:
                 continue
 
             char, conf, alternatives = classify_glyph(img_final)
+
+            if visualize:
+                viz_tight.append(tight_roi.copy())
+                viz_crops.append(img_final.copy())
+                viz_labels.append(f"{char} {conf * 100:.0f}%")
 
             abs_x = int(x + ink_x)
             abs_y = int(y + ink_y)
@@ -872,6 +1127,38 @@ def preprocess_and_predict(image_bytes, session_id):
 
     final_text = " | ".join(line for line in full_sentence_text if line)
     avg_conf = round(np.mean(confidences) * 100, 2) if confidences else 0.0
+
+    if viz is not None:
+        _viz("PART 2 - clean each box", "10. tight crop per glyph",
+             "Each box re-cut to its exact ink footprint (in reading order).",
+             _montage(viz_tight, cols=10, cell=90))
+        _viz("PART 2 - clean each box",
+             "11. " + ("despeckle skipped" if white_paper else
+                       f"remove_small_objects (min {MIN_NOISE_SIZE}px)") +
+             " -> pad -> resize 64x64",
+             "The exact 64x64 grayscale images handed to the model. A kudlit dot "
+             "is only a few pixels here.", _montage(viz_crops, cols=10, cell=64))
+        try:
+            hog_tiles = []
+            for cr in viz_crops:
+                _, hi = hog(cr, orientations=HOG_ORIENTATIONS,
+                            pixels_per_cell=HOG_PIXELS_PER_CELL,
+                            cells_per_block=HOG_CELLS_PER_BLOCK,
+                            block_norm=HOG_BLOCK_NORM, visualize=True)
+                hog_tiles.append(cv2.normalize(hi, None, 0, 255, cv2.NORM_MINMAX)
+                                 .astype(np.uint8))
+            _viz("PART 3 - classify", "12. HOG features (1764 numbers per glyph)",
+                 "The edge-direction map the SVM actually sees - stroke shape is "
+                 "vivid, a small dot barely registers.",
+                 _montage(hog_tiles, cols=10, cell=64))
+        except Exception:
+            pass
+        _viz("PART 3 - classify", "13. model prediction",
+             f"HOG + 26 spatial features -> SVM -> 1 of 95 classes. "
+             f"Result: \"{final_text}\"  (avg {avg_conf}%).",
+             _montage(viz_crops, cols=10, cell=90, labels=viz_labels))
+        meta["visualize_b64"] = viz
+
     return final_text, avg_conf, detections, meta
 
 # --- 5. API ROUTES ---
@@ -894,8 +1181,14 @@ def translate():
                 return jsonify({"error": "No image uploaded"}), 400
             
             image_bytes = request.files['file'].read()
+            white_paper = str(request.form.get('white_paper', '')).strip().lower() \
+                in ('1', 'true', 'yes', 'on')
+            visualize = str(request.form.get('visualize', '')).strip().lower() \
+                in ('1', 'true', 'yes', 'on')
             try:
-                text, conf, results, meta = preprocess_and_predict(image_bytes, session_id)
+                text, conf, results, meta = preprocess_and_predict(
+                    image_bytes, session_id, white_paper=white_paper,
+                    visualize=visualize)
             except UnsupportedImageError as exc:
                 update_session_status(session_id, 'Unsupported_Format')
                 return jsonify({
@@ -921,6 +1214,14 @@ def translate():
                 # refer to (deskewed, width-normalised), plus the applied skew.
                 "processed_size": meta["processed_size"],
                 "deskew_angle": meta["deskew_angle"],
+                "white_paper": meta.get("white_paper", False),
+                "avg_glyph_px": meta.get("avg_glyph_px"),
+                "capture_warning": meta.get("capture_warning"),
+                # what the computer actually sees, stage by stage (base64 JPEG)
+                "processed_b64": meta.get("processed_b64"),
+                "stages_b64": meta.get("stages_b64", {}),
+                # full ordered pipeline walkthrough (only when visualize=1)
+                "visualize_b64": meta.get("visualize_b64", []),
             })
 
         elif mode == 'Tagalog to Baybayin':
