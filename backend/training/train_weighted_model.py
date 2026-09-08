@@ -279,6 +279,41 @@ def augment_once(pre_img, rng):
     return out
 
 
+_STANDALONE_VOWELS = {"A", "E", "I", "O", "U"}
+
+
+def has_kudlit(class_name):
+    """True for classes that carry a mark: bare consonant (virama) or +e/i/o/u.
+    False for the inherent -a forms and the standalone vowels."""
+    if class_name in _STANDALONE_VOWELS:
+        return False
+    low = class_name.lower()
+    if not any(v in low for v in "aeiou"):
+        return True                       # bare consonant -> virama
+    return low[-1] in "eiou"              # +e/i/o/u kudlit; +a has none
+
+
+def augment_kudlit(pre_img, rng):
+    """Heavier augment, only for mark-bearing classes: wider affine so the
+    kudlit lands in more positions/sizes relative to the body, and always a
+    stroke-thickness change. The dash-vs-dot / present-vs-absent boundary is
+    razor-thin, so this widens it without flips or big rotations."""
+    h, w = pre_img.shape
+    angle = rng.uniform(-6, 6)
+    scale = rng.uniform(0.85, 1.18)
+    tx, ty = rng.integers(-5, 6), rng.integers(-5, 6)
+    m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, scale)
+    m[0, 2] += tx
+    m[1, 2] += ty
+    out = cv2.warpAffine(pre_img, m, (w, h), flags=cv2.INTER_AREA,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    if rng.integers(0, 2):
+        out = cv2.dilate(out, np.ones((2, 2), np.uint8), iterations=1)
+    else:
+        out = cv2.erode(out, np.ones((2, 2), np.uint8), iterations=1)
+    return out
+
+
 # ============================================================================
 # DATASET
 # ============================================================================
@@ -313,25 +348,29 @@ def discover(root, limit_per_class=None):
     return items, class_counts
 
 
-def _process_one(path, label, n_aug, seed):
+def _process_one(path, label, n_aug, kudlit_aug, seed):
     warnings.filterwarnings("ignore")  # also silence inside joblib worker processes
     gray = load_grayscale(path)
     pre = preprocess_image(gray)
     if pre is None:
         return []
     rows = [(extract_combined_features(pre), label, str(path))]
-    if n_aug:
+    k_aug = kudlit_aug if (kudlit_aug and has_kudlit(label)) else 0
+    if n_aug or k_aug:
         rng = np.random.default_rng(abs(hash((str(path), seed))) % (2**32))
         for k in range(n_aug):
             rows.append((extract_combined_features(augment_once(pre, rng)),
                          label, f"{path}#aug{k}"))
+        for k in range(k_aug):
+            rows.append((extract_combined_features(augment_kudlit(pre, rng)),
+                         label, f"{path}#kaug{k}"))
     return rows
 
 
-def build_matrix(items, n_aug, seed, n_jobs):
+def build_matrix(items, n_aug, kudlit_aug, seed, n_jobs):
     t0 = time.time()
     batches = joblib.Parallel(n_jobs=n_jobs, verbose=5)(
-        joblib.delayed(_process_one)(p, lab, n_aug, seed) for p, lab in items
+        joblib.delayed(_process_one)(p, lab, n_aug, kudlit_aug, seed) for p, lab in items
     )
     feats, labels, paths = [], [], []
     for b in batches:
@@ -409,14 +448,16 @@ def sha256(path):
     return h.hexdigest()
 
 
-def run(data, out, augment=0, C=SVC_C_DEFAULT, search_c="", weight_grid="",
-        fixed_weight=0, limit_per_class=0, n_jobs=-1, target_size=64):
+def run(data, out, augment=0, kudlit_augment=0, C=SVC_C_DEFAULT, search_c="",
+        weight_grid="", fixed_weight=0, limit_per_class=0, n_jobs=-1,
+        target_size=64):
     """Notebook entry point - call this instead of using the CLI, e.g.:
         run(data="/content/drive/MyDrive/ALL_DATASET",
-            out="/content/drive/MyDrive/WEIGHTED_MODEL_V4",
-            augment=2, target_size=96)
+            out="/content/drive/MyDrive/WEIGHTED_MODEL_V6",
+            kudlit_augment=3)          # sanity check: mark-class augment only
     """
     argv = ["--data", str(data), "--out", str(out), "--augment", str(augment),
+            "--kudlit-augment", str(kudlit_augment),
             "--C", str(C), "--n-jobs", str(n_jobs), "--target-size", str(target_size)]
     if search_c:
         argv += ["--search-c", str(search_c)]
@@ -437,6 +478,11 @@ def main(argv=None):
     ap.add_argument("--augment", type=int, default=0,
                     help="augmented copies per training image (0 = off; 2 is a good "
                          "start for kudlit robustness, ~2-3x training time)")
+    ap.add_argument("--kudlit-augment", type=int, default=0,
+                    help="extra augmented copies for MARK-BEARING classes only "
+                         "(bare consonant + e/i/o/u forms): wider affine so the "
+                         "kudlit varies in position/size. Sanity check for "
+                         "whether mark data - not architecture - is the fix.")
     ap.add_argument("--C", type=float, default=SVC_C_DEFAULT)
     ap.add_argument("--search-c", default="", help="comma list, e.g. 10,20,50,100")
     ap.add_argument("--weight-grid", default="",
@@ -473,7 +519,7 @@ def main(argv=None):
               f"(kudlit variants are a common culprit): {weak}")
 
     # ---- 2. features ----
-    X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, SEED, args.n_jobs)
+    X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, 0, SEED, args.n_jobs)
 
     le = LabelEncoder().fit(sorted(class_counts))
     y_all = le.transform(y_all_str)
@@ -487,9 +533,10 @@ def main(argv=None):
     print(f"split: train {len(idx_tr)}  val {len(idx_va)}  test {len(idx_te)}")
 
     # augment TRAIN only
-    if args.augment:
+    if args.augment or args.kudlit_augment:
         train_items = [items[i] for i in idx_tr]
-        Xtr, ytr_str, ptr = build_matrix(train_items, args.augment, SEED, args.n_jobs)
+        Xtr, ytr_str, ptr = build_matrix(
+            train_items, args.augment, args.kudlit_augment, SEED, args.n_jobs)
         ytr = le.transform(ytr_str)
     else:
         Xtr, ytr, ptr = X_all_noaug[idx_tr], y_all[idx_tr], paths_all[idx_tr]
@@ -596,6 +643,7 @@ def main(argv=None):
         "classes": list(le.classes_),
         "source_images": len(items),
         "augment_per_image": args.augment,
+        "kudlit_augment": args.kudlit_augment,
         "train/val/test": [int(len(ytr)), int(len(yva)), int(len(yte))],
         "svc": {"C": C, "gamma": SVC_GAMMA, "class_weight": "balanced",
                 "n_support_vectors": int(model.support_vectors_.shape[0])},
@@ -628,7 +676,8 @@ def main(argv=None):
     (out / "MODEL_README.txt").write_text(
         f"DAYAW weighted Baybayin model - trained {metrics['trained_at']}\n"
         f"Test accuracy: {acc:.4f}  (calibrated {acc_cal:.4f})\n"
-        f"{n_classes} classes, {len(items)} source images, augment x{args.augment}\n\n"
+        f"{n_classes} classes, {len(items)} source images, "
+        f"augment x{args.augment}, kudlit-augment x{args.kudlit_augment}\n\n"
         f"Pipeline (must match backend/app.py):\n"
         f"  preprocess: grayscale -> Otsu invert -> remove_small_objects(min_size={MIN_NOISE_SIZE})\n"
         f"    -> tight crop -> pad square (ratio {PAD_RATIO}) -> resize {TARGET_SIZE}x{TARGET_SIZE}\n"

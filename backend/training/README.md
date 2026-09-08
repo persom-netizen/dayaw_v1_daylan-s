@@ -120,10 +120,38 @@ let you trace misclassifications back to source images.
 
 ---
 
-## 4. Fixing the kudlit errors (`Ko`↔`K`, `Ni`↔`Ne`, …)
+## 4. Fixing the kudlit errors (`Ko`↔`K`, `No`↔`N`, `Ngo`↔`Ng`, …)
 
-That confusion is the model's #1 error class (base glyph vs its e/i / o/u kudlit
-variant). Options, cheapest first — the first three need **no `app.py` change**:
+As of V5 the dash-vs-dot pairs (`Ne/Ni`, `Nu/No`) are fine (F1 0.96–0.99). The
+live wall is **bare consonant ↔ its `-o` (dot-below) form**: `Go↔G`, `Ng↔Ngo`,
+`N↔No`, `So↔S`, `T↔To`, `Yo↔Y`, `Lo↔L`, `Po↔P`, `Ro↔R`. The dot-below is ~4px
+at 64 and sits where many glyph bodies already have low ink.
+
+### 0. Sanity check: `--kudlit-augment N`  (no `app.py` change)
+
+Before committing to the two-head model, test whether **mark data** — not the
+architecture — is the fix. This augments *only* the mark-bearing classes (bare
+consonant + `-e/-i/-o/-u`) with a wider affine so the kudlit lands in more
+positions/sizes:
+
+```python
+run(data="/content/drive/MyDrive/ALL_DATASET",
+    out="/content/drive/MyDrive/WEIGHTED_MODEL_V6",
+    kudlit_augment=3)
+```
+
+Then compare `top_confusions.json` / the `No Ngo Go So To` rows of
+`classification_report.txt` against V5's `metrics.json`:
+
+- **F1 on those classes goes up a few points** → mark data helps; the two-head
+  model (a stronger version of the same idea) is very likely to help more.
+- **No movement at all** → the 64px physical resolution is the ceiling; the
+  two-head won't save it either, and the real levers are `--target-size 96`
+  plus your own `-o/-u` handwriting in the dataset.
+
+The `-a` forms and standalone vowels are left un-augmented. Roughly
+`1 + N`× the mark classes' rows, so `kudlit_augment=3` is ~1.5–2× total
+training time.
 
 ### a. Balance the dataset
 The script prints per-class counts and warns about any class below 50% of the
