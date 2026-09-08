@@ -997,11 +997,17 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
             f"Small capture - glyphs are about {int(avg_width)}px wide. Hold the "
             "camera closer or crop tighter (aim for 90px+); segmentation and "
             "kudlit detection degrade sharply below ~70px.")
+    quality_notes = [capture_warning] if capture_warning else []
+    if abs(deskew_angle) > 12:
+        quality_notes.append(
+            f"Page is tilted about {abs(deskew_angle):.0f} deg - only 0.3-20 deg "
+            "is corrected, and never per line. Keep the paper straight.")
     meta = {"processed_size": [int(proc_w), int(proc_h)],
             "deskew_angle": round(float(deskew_angle), 3),
             "white_paper": bool(white_paper),
             "avg_glyph_px": [int(avg_width or 0), int(avg_height or 0)],
             "capture_warning": capture_warning,
+            "quality_notes": quality_notes,
             "processed_b64": stages_b64.get("2_flattened"),
             "stages_b64": stages_b64}
 
@@ -1070,6 +1076,31 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
         if viz is not None:
             meta["visualize_b64"] = viz
         return "No characters detected", 0.0, [], meta
+
+    # --- limitation checks: tell the user what to fix next time ---
+    overlaps, wide = 0, 0
+    issue_px = []
+    for line in lines:
+        for a, b in zip(line, line[1:]):
+            if b[0] - (a[0] + a[2]) < -0.12 * avg_width:  # boxes clearly intersect
+                overlaps += 1
+                issue_px.append([int(a[0]), int(a[1]), int(b[0] + b[2] - a[0]),
+                                 int(max(a[3], b[3]))])
+        for (x, y, w, h) in line:
+            if w > 1.9 * avg_width:                       # never got split
+                wide += 1
+                issue_px.append([int(x), int(y), int(w), int(h)])
+    if overlaps:
+        quality_notes.append(
+            f"{overlaps} pair(s) of character boxes overlap - two glyphs were "
+            "written too close and may be read as one. Leave a clear gap "
+            "between every character.")
+    if wide:
+        quality_notes.append(
+            f"{wide} box(es) are far wider than one glyph - characters are "
+            "likely merged. Space them apart so each stands alone.")
+    meta["quality_notes"] = quality_notes
+    meta["issue_bbox_px"] = issue_px
 
     # Isotonic-calibrated proba is well-scaled but weakly discriminative, so a
     # low floor just drops the few genuinely hopeless glyphs. The raw softmax
@@ -1250,6 +1281,8 @@ def translate():
                 "white_paper": meta.get("white_paper", False),
                 "avg_glyph_px": meta.get("avg_glyph_px"),
                 "capture_warning": meta.get("capture_warning"),
+                "quality_notes": meta.get("quality_notes", []),
+                "issue_bbox_px": meta.get("issue_bbox_px", []),
                 # what the computer actually sees, stage by stage (base64 JPEG)
                 "processed_b64": meta.get("processed_b64"),
                 "stages_b64": meta.get("stages_b64", {}),

@@ -492,30 +492,8 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (_response['capture_warning'] is String) ...[
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.amber[50],
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.amber[300]!),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(Icons.warning_amber_rounded,
-                              size: 18, color: Colors.amber[800]),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _response['capture_warning'] as String,
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+                  if (_qualityNotes.isNotEmpty) ...[
+                    _qualityCard(),
                     const SizedBox(height: 12),
                   ],
                   const Text("Translation Result",
@@ -854,6 +832,51 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
       ));
     }
     return widgets;
+  }
+
+  List<String> get _qualityNotes {
+    final raw = _response['quality_notes'];
+    final out = <String>[];
+    if (raw is List) {
+      for (final n in raw) {
+        if (n is String && n.trim().isNotEmpty) out.add(n.trim());
+      }
+    }
+    if (out.isEmpty && _response['capture_warning'] is String) {
+      out.add(_response['capture_warning'] as String);
+    }
+    return out;
+  }
+
+  Widget _qualityCard() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.amber[50],
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.amber[300]!),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, size: 18, color: Colors.amber[800]),
+              const SizedBox(width: 8),
+              const Text("This scan hit a known limitation",
+                  style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final note in _qualityNotes)
+            Padding(
+              padding: const EdgeInsets.only(left: 2, top: 3),
+              child: Text("•  $note", style: const TextStyle(fontSize: 12)),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _lexiconToggle() {

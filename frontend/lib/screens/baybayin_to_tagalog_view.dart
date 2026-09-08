@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
 import '../services/scan_logger.dart';
 import '../widgets/image_cropper_widget.dart';
+import '../widgets/scan_guide.dart';
 import 'btl_result_screen.dart';
 
 /// "Baybayin to Tagalog" mode: capture / upload a photo, crop it, send it for
@@ -118,19 +119,29 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
         Center(
           child: _lastImage != null
               ? Image.memory(_lastImage!, fit: BoxFit.contain)
-              : const Padding(
-                  padding: EdgeInsets.all(24.0),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.document_scanner, size: 64, color: Colors.brown),
-                      SizedBox(height: 12),
-                      Text(
-                        "Upload or scan a document containing Baybayin scripts to transcribe",
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey, fontSize: 14),
-                      ),
-                    ],
+              : GestureDetector(
+                  onTap: () => showScanGuide(context),
+                  child: Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.document_scanner,
+                            size: 64, color: Colors.brown),
+                        const SizedBox(height: 12),
+                        const Text(
+                          "Upload or scan a document containing Baybayin scripts to transcribe",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey, fontSize: 14),
+                        ),
+                        const SizedBox(height: 10),
+                        Text("Tap for scan tips",
+                            style: TextStyle(
+                                color: Colors.brown[300],
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600)),
+                      ],
+                    ),
                   ),
                 ),
         ),
@@ -217,7 +228,7 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
             child: _buildImageArea(),
           ),
         ),
-        const SizedBox(height: 30),
+        const SizedBox(height: 24),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 30),
           child: Row(
@@ -230,6 +241,13 @@ class _BaybayinToTagalogViewState extends State<BaybayinToTagalogView> {
                   () => _selectAndCropImage(ImageSource.camera)),
             ],
           ),
+        ),
+        const SizedBox(height: 6),
+        TextButton.icon(
+          onPressed: () => showScanGuide(context),
+          icon: const Icon(Icons.help_outline, size: 18),
+          label: const Text("How to scan"),
+          style: TextButton.styleFrom(foregroundColor: Colors.brown),
         ),
       ],
     );
