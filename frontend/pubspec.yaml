@@ -34,6 +34,7 @@ flutter:
 
   assets:
     - assets/images/dayawlogo.png
+    - assets/tagalog_words.txt
 
 
   fonts:

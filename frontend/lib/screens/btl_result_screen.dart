@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:share_plus/share_plus.dart';
 import '../services/api_service.dart';
+import '../services/lexicon.dart';
 import '../services/result_exporter.dart';
 import '../services/scan_logger.dart';
 
@@ -57,6 +58,10 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
   bool _vizLoaded = false;
   bool _saving = false;
 
+  /// Optional Tagalog spell-snapping of the displayed result. Off by default.
+  bool _lexiconOn = false;
+  int _snapped = 0;
+
   static const _stageLabels = {
     '0_raw': 'Raw',
     '1_normalized': 'Normalized',
@@ -83,6 +88,24 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
     _working = _detectionsFrom(_response);
     _decodeStages(_response);
     _hydrateViz(_response);
+    Lexicon.instance.load().then((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  /// The result text as shown / copied — with Tagalog snapping applied when the
+  /// toggle is on.
+  String _lex(String s) {
+    if (!_lexiconOn) return s;
+    return Lexicon.instance.correctPhrase(s).$1;
+  }
+
+  void _toggleLexicon(bool on) {
+    final n = on ? Lexicon.instance.correctPhrase(_plainResult).$2 : 0;
+    setState(() {
+      _lexiconOn = on;
+      _snapped = n;
+    });
   }
 
   void _hydrateViz(Map<String, dynamic> resp) {
@@ -314,7 +337,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
   }
 
   void _copyResult() {
-    final text = _plainResult.replaceAll('\n', ' ');
+    final text = _lex(_plainResult).replaceAll('\n', ' ');
     if (text.isEmpty) return;
     Clipboard.setData(ClipboardData(text: text));
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -500,7 +523,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                           TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 6),
                   Text(
-                    _resultText,
+                    _lex(_resultText),
                     style: const TextStyle(
                         fontSize: 26,
                         fontWeight: FontWeight.bold,
@@ -517,7 +540,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                       children: [
                         Expanded(
                           child: SelectableText(
-                            "Result: ${_plainResult.replaceAll('\n', ' ')}",
+                            "Result: ${_lex(_plainResult).replaceAll('\n', ' ')}",
                             style: const TextStyle(fontSize: 15),
                           ),
                         ),
@@ -532,6 +555,8 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
+                  _lexiconToggle(),
+                  const SizedBox(height: 8),
                   _modeToggle(),
                   const SizedBox(height: 8),
                   _visualizeSection(),
@@ -829,6 +854,53 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
       ));
     }
     return widgets;
+  }
+
+  Widget _lexiconToggle() {
+    final ready = Lexicon.instance.isLoaded;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
+      decoration: BoxDecoration(
+        color: _lexiconOn ? Colors.teal.withValues(alpha: 0.06) : Colors.grey[100],
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+            color: _lexiconOn
+                ? Colors.teal.withValues(alpha: 0.4)
+                : Colors.grey.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.spellcheck, size: 18, color: Colors.teal),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text("Snap to Tagalog words",
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                Text(
+                  !ready
+                      ? "Loading word list…"
+                      : (_lexiconOn
+                          ? (_snapped == 0
+                              ? "On — no words needed snapping."
+                              : "On — $_snapped word${_snapped == 1 ? '' : 's'} "
+                                  "snapped to the nearest Tagalog word.")
+                          : "Off — showing the raw model output. "
+                              "Optional spelling fix, does not change detections."),
+                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: _lexiconOn,
+            activeThumbColor: Colors.teal,
+            onChanged: ready ? _toggleLexicon : null,
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _modeToggle() {
