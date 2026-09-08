@@ -25,6 +25,7 @@ class ApiService {
     String? text,
     Uint8List? imageBytes,
     bool whitePaper = false,
+    String penType = 'marker',
     bool visualize = false,
   }) async {
     try {
@@ -33,6 +34,7 @@ class ApiService {
 
       request.fields['mode'] = mode;
       request.fields['white_paper'] = whitePaper.toString();
+      request.fields['pen_type'] = penType;
       request.fields['visualize'] = visualize.toString();
 
       if (mode == 'Tagalog to Baybayin' && text != null) {

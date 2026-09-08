@@ -43,6 +43,9 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
   /// White-paper mode: backend skips the noise-robustness steps (downscale,
   /// dilation, small-object removal) that also erode thin-pen kudlit dots.
   late bool _whitePaper;
+  /// 'marker' (default) or 'pen' — pen mode thickens thin strokes ~1px and
+  /// keeps the noise floor low so a ballpen kudlit dot survives.
+  late String _penType;
   bool _rescanning = false;
 
   /// Mutable working copy of the detections — corrections land here.
@@ -85,6 +88,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
     _response = widget.response;
     _scanId = widget.scanId;
     _whitePaper = _response['white_paper'] == true;
+    _penType = _response['pen_type'] == 'pen' ? 'pen' : 'marker';
     _working = _detectionsFrom(_response);
     _decodeStages(_response);
     _hydrateViz(_response);
@@ -149,7 +153,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
           'Average confidence: ${_average.toStringAsFixed(1)}%',
           'Scan confidence: '
               '${(_response['confidence'] as num? ?? 0).toStringAsFixed(1)}%',
-          'Processing mode: ${_whitePaper ? 'white-paper' : 'standard'}',
+          'Processing mode: ${_whitePaper ? 'white-paper' : 'standard'} / $_penType',
         ],
         processed: _stages['2_flattened'],
         procW: pw,
@@ -200,6 +204,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
       'Baybayin to Tagalog',
       imageBytes: widget.imageBytes,
       whitePaper: _whitePaper,
+      penType: _penType,
       visualize: true,
     );
     if (!mounted) return;
@@ -251,17 +256,21 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
           .map((d) => Map<String, dynamic>.from(d))
           .toList();
 
-  Future<void> _rescan(bool whitePaper) async {
+  Future<void> _rescan({bool? whitePaper, String? penType}) async {
     if (_rescanning) return;
+    final wp = whitePaper ?? _whitePaper;
+    final pt = penType ?? _penType;
     setState(() {
       _rescanning = true;
-      _whitePaper = whitePaper;
+      _whitePaper = wp;
+      _penType = pt;
     });
     final resp = await ApiService().uploadAndTranslateDetailed(
       null,
       'Baybayin to Tagalog',
       imageBytes: widget.imageBytes,
-      whitePaper: whitePaper,
+      whitePaper: wp,
+      penType: pt,
     );
     if (!mounted) return;
     if (resp == null) {
@@ -534,6 +543,8 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
                   ),
                   const SizedBox(height: 12),
                   _lexiconToggle(),
+                  const SizedBox(height: 8),
+                  _penMarkerToggle(),
                   const SizedBox(height: 8),
                   _modeToggle(),
                   const SizedBox(height: 8),
@@ -926,6 +937,77 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
     );
   }
 
+  Widget _penMarkerToggle() {
+    Widget seg(String value, String label, IconData icon) {
+      final on = _penType == value;
+      return Expanded(
+        child: InkWell(
+          onTap: (_rescanning || on) ? null : () => _rescan(penType: value),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 7),
+            decoration: BoxDecoration(
+              color: on ? Colors.brown.withValues(alpha: 0.12) : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                  color: on
+                      ? Colors.brown.withValues(alpha: 0.5)
+                      : Colors.grey.withValues(alpha: 0.25)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon,
+                    size: 15,
+                    color: on ? Colors.brown : Colors.grey),
+                const SizedBox(width: 5),
+                Text(label,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: on ? FontWeight.w600 : FontWeight.normal,
+                        color: on ? Colors.brown : Colors.grey[700])),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text("Writing tool",
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            if (_rescanning) ...[
+              const SizedBox(width: 8),
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 2, color: Colors.brown),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 4),
+        Row(children: [
+          seg('marker', 'Marker', Icons.brush),
+          const SizedBox(width: 8),
+          seg('pen', 'Pen', Icons.edit),
+        ]),
+        const SizedBox(height: 3),
+        Text(
+          _penType == 'pen'
+              ? "Pen: thin strokes thickened ~1px, low noise floor — keeps ballpen kudlit dots."
+              : "Marker: standard pipeline (dataset is marker-weight).",
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+      ],
+    );
+  }
+
   Widget _modeToggle() {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 4, 8, 4),
@@ -975,7 +1057,7 @@ class _BtlResultScreenState extends State<BtlResultScreen> {
           Switch(
             value: _whitePaper,
             activeThumbColor: Colors.brown,
-            onChanged: _rescanning ? null : (v) => _rescan(v),
+            onChanged: _rescanning ? null : (v) => _rescan(whitePaper: v),
           ),
         ],
       ),

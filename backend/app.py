@@ -267,6 +267,23 @@ def flatten_background(gray, blur_kernel=BG_BLUR_KERNEL):
     return cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX)
 
 
+# ----------------------------------------------------------------------------
+# Pen vs marker. The dataset is marker-weight; a thin ballpen stroke loses its
+# kudlit dot to remove_small_objects and to the 64px downscale. "pen" mode
+# (a) grows the ink ~1px so strokes approach marker weight and the kudlit
+# survives the resize, and (b) keeps the noise floor low so the dot isn't
+# erased. "marker" mode is the current behaviour, unchanged.
+PEN_MIN_NOISE = 5            # remove_small_objects floor in pen mode (marker: 20)
+STROKE_THICKEN_ITERS = 1     # 2x2 dilation of the dark ink in pen mode
+
+
+def _thicken_ink(gray, iters=STROKE_THICKEN_ITERS):
+    """Grow dark strokes by ~1px. Eroding a grayscale image expands the dark
+    (ink) regions, so a thin pen line gets closer to marker weight without
+    changing the glyph's shape."""
+    return cv2.erode(gray, np.ones((2, 2), np.uint8), iterations=iters)
+
+
 def measure_average_char_size(gray):
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     light_kernel = np.ones((3, 3), np.uint8)
@@ -328,12 +345,14 @@ def merge_by_proximity(boxes, avg_width, avg_height,
 
 
 def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX, white_paper=False,
-                           stages=None):
+                           pen_type="marker", stages=None):
     img = normalize_image_size(img, upscale_only=white_paper)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     if stages is not None:
         stages["1_normalized"] = img.copy()
     gray = flatten_background(gray)  # normalise lighting before any thresholding
+    if pen_type == "pen":
+        gray = _thicken_ink(gray)   # thin ballpen -> ~marker weight (see _thicken_ink)
     if stages is not None:
         stages["2_flattened"] = gray.copy()
     h_img, w_img = gray.shape
@@ -1050,20 +1069,26 @@ def _boxes_overlay(gray, box_groups):
 
 
 def preprocess_and_predict(image_bytes, session_id, white_paper=False,
-                           visualize=False):
+                           pen_type="marker", visualize=False):
     img = _decode_image_bytes(image_bytes)  # raises UnsupportedImageError
 
     # White-paper mode: the background is guaranteed clean, so skip the steps
     # that trade detail for noise-robustness - no downscaling, no morphological
     # dilation (merge boxes by proximity instead), no remove_small_objects
     # (which eats thin-pen kudlit dots). See detect_character_boxes / _despeckle.
-    mns = 0 if white_paper else MIN_NOISE_SIZE
+    pen_type = "pen" if str(pen_type).lower() == "pen" else "marker"
+    if white_paper:
+        mns = 0
+    elif pen_type == "pen":
+        mns = PEN_MIN_NOISE          # don't erase a thin-ballpen kudlit dot
+    else:
+        mns = MIN_NOISE_SIZE
 
     stage_imgs = {"0_raw": img.copy()}
     img, deskew_angle = deskew_image(img)
     stage_imgs["0b_deskewed"] = img.copy()
     boxes, gray, _, avg_height, avg_width = detect_character_boxes(
-        img, white_paper=white_paper, stages=stage_imgs)
+        img, white_paper=white_paper, pen_type=pen_type, stages=stage_imgs)
     proc_h, proc_w = gray.shape[:2]
     # base64 previews so the app can show WHAT THE COMPUTER SEES at each stage,
     # not the raw capture. The bbox coords in `detections` are in the
@@ -1085,6 +1110,7 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
     meta = {"processed_size": [int(proc_w), int(proc_h)],
             "deskew_angle": round(float(deskew_angle), 3),
             "white_paper": bool(white_paper),
+            "pen_type": pen_type,
             "avg_glyph_px": [int(avg_width or 0), int(avg_height or 0)],
             "capture_warning": capture_warning,
             "quality_notes": quality_notes,
@@ -1332,10 +1358,11 @@ def translate():
                 in ('1', 'true', 'yes', 'on')
             visualize = str(request.form.get('visualize', '')).strip().lower() \
                 in ('1', 'true', 'yes', 'on')
+            pen_type = str(request.form.get('pen_type', 'marker')).strip().lower()
             try:
                 text, conf, results, meta = preprocess_and_predict(
                     image_bytes, session_id, white_paper=white_paper,
-                    visualize=visualize)
+                    pen_type=pen_type, visualize=visualize)
             except UnsupportedImageError as exc:
                 update_session_status(session_id, 'Unsupported_Format')
                 return jsonify({
@@ -1362,6 +1389,7 @@ def translate():
                 "processed_size": meta["processed_size"],
                 "deskew_angle": meta["deskew_angle"],
                 "white_paper": meta.get("white_paper", False),
+                "pen_type": meta.get("pen_type", "marker"),
                 "avg_glyph_px": meta.get("avg_glyph_px"),
                 "capture_warning": meta.get("capture_warning"),
                 "quality_notes": meta.get("quality_notes", []),
