@@ -220,9 +220,17 @@ BG_BLUR_KERNEL = 101
 
 
 def normalize_image_size(img, standard_width=STANDARD_WIDTH, upscale_only=False):
+    """Bring the working image to `standard_width` so every ratio-based
+    threshold downstream is predictable AND - more importantly - so each glyph
+    lands ~80-120px before the per-glyph crop->64 resize. Leaving a big photo
+    at full size makes glyphs 200px+, so the crop downscale is *more* brutal on
+    the mark, not less (AUDIT #4 first tried upscale-only and it regressed
+    "sa labas" -> "sa lobas"; reverted). upscale_only=True (white-paper mode)
+    still skips the shrink for already-clean scans.
+    """
     h, w = img.shape[:2]
     if upscale_only and w >= standard_width:
-        return img  # white-paper mode: never shrink a photo (keeps kudlit detail)
+        return img
     scale = standard_width / w
     new_h = int(h * scale)
     interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
@@ -255,16 +263,22 @@ def deskew_image(img):
 
 def flatten_background(gray, blur_kernel=BG_BLUR_KERNEL):
     """CamScanner-style "clean to white": divide the image by a heavily blurred
-    copy of itself to cancel uneven lighting, shadows and off-white paper, then
-    stretch contrast. On an already-clean scan this is ~a no-op; on a phone
-    photo it turns a grey/shadowed background into flat white so the downstream
-    Otsu threshold isolates ink cleanly.
+    copy of itself to cancel uneven lighting, shadows and off-white paper.
+
+    AUDIT #5: on an already-clean, evenly-lit scan the divide is a no-op but the
+    final NORM_MINMAX contrast-stretch can blow a faint kudlit / virama toward
+    white and drop it below Otsu. So the stretch now runs ONLY when the
+    background is genuinely uneven (blurred-bg spread is wide). A clean image
+    passes through with just the divide.
     """
     k = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
     bg = cv2.GaussianBlur(gray, (k, k), 0)
+    bg_uneven = float(bg.std()) > 18.0          # ~uniform paper -> std is small
     bg = np.where(bg < 1, 1, bg).astype(np.uint8)
     norm = cv2.divide(gray, bg, scale=255)
-    return cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX)
+    if bg_uneven:
+        return cv2.normalize(norm, None, 0, 255, cv2.NORM_MINMAX)
+    return norm
 
 
 # ----------------------------------------------------------------------------
@@ -404,14 +418,19 @@ def detect_character_boxes(img, edge_margin=EDGE_MARGIN_PX, white_paper=False,
         if (w * h) < min_box_area:
             continue
 
-        touches_border = (
-            x <= edge_margin or y <= edge_margin or
-            x + w >= w_img - edge_margin or y + h >= h_img - edge_margin
-        )
-        if touches_border:
+        # AUDIT #6: don't delete a glyph just for touching the frame - a kudlit
+        # near the edge used to take the whole character with it. Clamp to the
+        # frame, and only drop it if most of the box was actually outside.
+        cx0, cy0 = max(x, edge_margin), max(y, edge_margin)
+        cx1 = min(x + w, w_img - edge_margin)
+        cy1 = min(y + h, h_img - edge_margin)
+        cw, ch = cx1 - cx0, cy1 - cy0
+        if cw < min_box_width or ch < min_box_height:
+            continue
+        if cw * ch < 0.55 * w * h:          # >45% of the box was off-frame -> junk
             continue
 
-        boxes.append((x, y, w, h))
+        boxes.append((cx0, cy0, cw, ch))
 
     if white_paper:
         boxes = merge_by_proximity(boxes, avg_width, avg_height)
@@ -544,13 +563,27 @@ def drop_stray_marks(boxes, avg_height, avg_width):
     if not marks or not bases:
         return boxes
 
+    def centre(b):
+        return (b[0] + b[2] / 2.0, b[1] + b[3] / 2.0)
+
     merged = list(bases)
     for m in marks:
+        # 1st choice: a base in the same column (kudlit sits directly above/below)
         cand = [i for i, base in enumerate(merged)
                 if x_overlap(m, base) >= 0.35 * m[2]
                 and v_gap(m, base) < 1.3 * avg_height]
         if not cand:
-            continue  # free-standing speck -> drop
+            # AUDIT #7: don't drop a real detached mark. Attach it to the
+            # NEAREST base within ~1.5 glyph-widths (segmentation may have
+            # placed it a little off). Only a mark isolated from everything
+            # (> 1.5 avg_width) is discarded as a true speck.
+            mcx, mcy = centre(m)
+            near = [(i, ((mcx - centre(b)[0]) ** 2 + (mcy - centre(b)[1]) ** 2) ** 0.5)
+                    for i, b in enumerate(merged)]
+            i, dist = min(near, key=lambda t: t[1])
+            if dist > 1.5 * avg_width:
+                continue                       # truly free-standing -> drop
+            cand = [i]
         j = min(cand, key=lambda i: v_gap(m, merged[i]))
         bx, by, bw, bh = merged[j]
         nx0, ny0 = min(bx, m[0]), min(by, m[1])

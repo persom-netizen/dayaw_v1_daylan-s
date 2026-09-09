@@ -1,4 +1,10 @@
 """
+!!! STALE - FROZEN AT THE 26-FEATURE V2/V3 PIPELINE. DO NOT USE AS A REFERENCE.
+The live spec is backend/training/train_weighted_model.py (kudlit features,
+--kudlit-augment, pen/marker thicken, etc). backend/app.py must match THAT
+file, not this one. Kept only for the original V2 provenance / regression
+checks against the very first model. Delete once V3 is retired.
+--------------------------------------------------------------------------------
 Baybayin BTL inference (v2) - single character prediction using the
 final, stronger model (91.14% test accuracy).
 
