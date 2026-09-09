@@ -287,8 +287,10 @@ def flatten_background(gray, blur_kernel=BG_BLUR_KERNEL):
 # (a) grows the ink ~1px so strokes approach marker weight and the kudlit
 # survives the resize, and (b) keeps the noise floor low so the dot isn't
 # erased. "marker" mode is the current behaviour, unchanged.
-PEN_MIN_NOISE = 5            # remove_small_objects floor in pen mode (marker: 20)
+PEN_MIN_NOISE = 3            # remove_small_objects floor in pen mode
+                            # (marker: MIN_NOISE_SIZE, 8 on V7 / 20 on V1-V6)
 STROKE_THICKEN_ITERS = 1     # 2x2 dilation of the dark ink in pen mode
+                            # (matches training thicken_once / --pen-aug)
 
 
 def _thicken_ink(gray, iters=STROKE_THICKEN_ITERS):
@@ -674,7 +676,12 @@ def insert_word_breaks(line_boxes, avg_width, word_gap_ratio=WORD_GAP_RATIO):
 # Follows whatever size the loaded model was trained at (64 or 96), inferred
 # from the HOG scaler above.
 TARGET_SIZE = DERIVED_TARGET_SIZE
-MIN_NOISE_SIZE = 20
+# AUDIT #1/#2: V1-V6 (26-feature spatial scaler) were trained with min_size 20,
+# which also wipes a faint kudlit dot (~3-6 px at 64 px). The V7 "mark" model
+# carries a 36-feature spatial scaler and is trained with 8, so the dot / dash
+# survives remove_small_objects. Switch on that signature so preprocessing here
+# always matches whichever model is installed - no manual edit on model swap.
+MIN_NOISE_SIZE = 8 if SPATIAL_FEATURE_LEN >= 36 else 20
 PAD_RATIO = 0.12
 HOG_ORIENTATIONS = 9
 HOG_PIXELS_PER_CELL = (8, 8)
@@ -838,23 +845,70 @@ def _kudlit_shape_features(binary):
     return strip_shape(binary[:band]) + strip_shape(binary[h - band:])
 
 
+def _kudlit_mark_features(binary):
+    """AUDIT #13-15: 10 numbers describing the diacritic ABOVE the body and the
+    one BELOW it, each as [present, width/body_width, aspect w/h, solidity,
+    area/body_area].
+
+      dot   (o, i) -> low width, aspect ~1,   high solidity (~0.8), small area
+      dash  (e, u) -> higher width, aspect > ~1.6, medium solidity
+      virama x     -> low solidity (~0.35 - crossing strokes leave gaps)
+      none / -a    -> present = 0
+
+    The mark is taken from a *detached satellite component* on that side of the
+    body's centroid, or - if it touches the body - from ink lying strictly
+    beyond the body's bounding box. Either way a descender / body tail is NOT
+    counted (it is part of the body component and inside the body bbox), which
+    is what the old fraction-of-total strip feature could not do.
+    """
+    h, w = binary.shape
+    reg = regionprops(sk_label(binary > 0))
+    if not reg:
+        return [0.0] * 10
+    body = max(reg, key=lambda r: r.area)
+    body_cy = float(body.centroid[0])
+    by0, _bx0, by1, bx1 = body.bbox
+    body_w = max(1.0, float(bx1 - _bx0))
+    body_area = max(1.0, float(body.area))
+
+    def side(above):
+        sats = [r for r in reg if r is not body and r.area < 0.45 * body.area
+                and ((r.centroid[0] < body_cy) if above else (r.centroid[0] > body_cy))]
+        if sats:
+            m = max(sats, key=lambda r: r.area)
+            r0, c0, r1, c1 = m.bbox
+            mw, mh, ar = float(c1 - c0), float(r1 - r0), float(m.area)
+        else:
+            band = binary[:max(1, by0)] if above else binary[min(h - 1, by1):]
+            ys, xs = np.where(band > 0)
+            if xs.size < 3:
+                return [0.0, 0.0, 0.0, 0.0, 0.0]
+            mw = float(xs.max() - xs.min() + 1)
+            mh = float(ys.max() - ys.min() + 1)
+            ar = float((band > 0).sum())
+        return [1.0,
+                min(2.0, mw / body_w),
+                min(6.0, mw / max(1.0, mh)),
+                min(1.0, ar / max(1.0, mw * mh)),
+                min(1.0, ar / body_area)]
+
+    return side(above=True) + side(above=False)
+
+
 def _extract_spatial_features(preprocessed_img):
     """Spatial feature vector: overall density (1) + 2x2 grid (4) + 4x4 grid (16)
-    + kudlit component stats (5) + kudlit top/bottom strip fractions (2)
-    + kudlit top/bottom mark shape (4) = 32.
+    + kudlit component stats (5) + kudlit MARK descriptor (10) = 36.
     The first 26 are the Colab inference.extract_spatial_features port; the
-    trailing 6 are new (see _kudlit_strip_features / _kudlit_shape_features).
-    _build_feature_vector slices to whatever the loaded spatial_scaler expects,
-    so this is safe with a 26-, 28- or 32-feature model."""
+    trailing 10 are _kudlit_mark_features (AUDIT #13-15 - replaces the weak
+    strip(2) + shape(4) block). _build_feature_vector slices to whatever the
+    loaded spatial_scaler expects, so a 26- or 36-feature model both drop in."""
     _, binary = cv2.threshold(preprocessed_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
     quadrant = _grid_density_features(binary, grid_size=2)
     fine_grid = _grid_density_features(binary, grid_size=4)
     kudlit_feats = _kudlit_component_features(binary)
-    strip_feats = _kudlit_strip_features(binary)
-    shape_feats = _kudlit_shape_features(binary)
-    return (overall_density + quadrant + fine_grid + kudlit_feats
-            + strip_feats + shape_feats)
+    mark_feats = _kudlit_mark_features(binary)
+    return (overall_density + quadrant + fine_grid + kudlit_feats + mark_feats)
 
 
 def _build_feature_vector(preprocessed_img):
@@ -1360,7 +1414,7 @@ def preprocess_and_predict(image_bytes, session_id, white_paper=False,
         except Exception:
             pass
         _viz("PART 3 - classify", "13. model prediction",
-             f"HOG + 26 spatial features -> SVM -> 1 of 95 classes. "
+             f"HOG + {SPATIAL_FEATURE_LEN} spatial features -> SVM -> 1 of 95 classes. "
              f"Result: \"{final_text}\"  (avg {avg_conf}%).",
              _montage(viz_crops, cols=10, cell=90, labels=viz_labels))
         meta["visualize_b64"] = viz

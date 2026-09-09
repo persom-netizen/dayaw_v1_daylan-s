@@ -25,11 +25,14 @@ deterministic and matches label_encoder.pkl.
 QUICK START - see backend/training/README.md for the full Colab cells.
 
   CLI:
-    python train_weighted_model.py --data ALL_DATASET --out WEIGHTED_MODEL_V3
+    python train_weighted_model.py --data ALL_DATASET --out WEIGHTED_MODEL_V7 \
+        --kudlit-augment 3 --pen-aug 1
 
   Notebook (paste this whole file into a cell, then in the NEXT cell):
     run(data="/content/drive/MyDrive/ALL_DATASET",
-        out="/content/drive/MyDrive/WEIGHTED_MODEL_V3")
+        out="/content/drive/MyDrive/WEIGHTED_MODEL_V7",
+        kudlit_augment=3,   # mark lands in more positions/sizes
+        pen_aug=1)          # 1 pen-weight (2x2 dilate) copy per glyph
     # optional: augment=2, weight_grid="2,4,6,8,10,12,15,20,25", search_c="10,20,50"
 
 --------------------------------------------------------------------------------
@@ -39,7 +42,7 @@ OUTPUTS (in --out):
     weighted_svm.pkl              SVC(C, gamma='scale', class_weight='balanced')
     weighted_svm_calibrated.pkl   + isotonic CalibratedClassifierCV (confidence)
     hog_scaler.pkl                StandardScaler on the 1764 HOG features
-    spatial_scaler.pkl            StandardScaler on the 26 spatial features
+    spatial_scaler.pkl            StandardScaler on the 36 spatial features
     best_weight.pkl               int, spatial-block multiplier
     label_encoder.pkl            LabelEncoder (int <-> class name)
 
@@ -83,23 +86,31 @@ from sklearn.svm import SVC
 # ============================================================================
 # CONFIG. backend/app.py reads the glyph size + feature lengths back from the
 # scalers this script produces, so --target-size drops in with no app.py edit.
-# The HOG params and the 26 spatial features must NOT change without matching
+# The HOG params and the 36 spatial features must NOT change without matching
 # edits in app.py's _build_feature_vector / _extract_spatial_features.
 # ============================================================================
 TARGET_SIZE = 64           # overridden by --target-size (64 or 96)
-MIN_NOISE_SIZE = 20
+# AUDIT #1/#2: the V7 "mark" model is trained at 8, not 20, so a faint kudlit
+# dot (~3-6 px at 64 px) survives remove_small_objects instead of being wiped
+# with the JPEG speckle. app.py auto-switches to 8 when it sees a 36-feature
+# spatial scaler, so app + model never drift.
+MIN_NOISE_SIZE = 8
 PAD_RATIO = 0.12
 
 HOG_ORIENTATIONS = 9
 HOG_PIXELS_PER_CELL = (8, 8)
 HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_BLOCK_NORM = "L2-Hys"
-# 26 = the Colab port; +2 = top/bottom kudlit-strip ink fractions;
-# +4 = top/bottom kudlit mark shape (aspect + relative width) - the dash-vs-dot
-# signal for Ne/Ni, Nu/No. See extract_spatial_features / app.py. app.py reads
-# this length back from the spatial scaler, so 28- or 32-feature models drop in
-# unchanged.
-N_SPATIAL_FEATURES = 32
+# 26 = the Colab port (density + grids + kudlit component stats);
+# +10 = the body-isolated kudlit MARK descriptor: [present, width/body_width,
+# aspect w/h, solidity, area/body_area] for the mark ABOVE the body and the one
+# BELOW it. This replaces the weak strip(2) + shape(4) fraction-of-total block,
+# which could not tell a real mark from a descender tail. It is the dash-vs-dot
+# (e/u vs i/o) and present-vs-absent (mark vs virama vs bare) signal. Keep
+# kudlit_mark_features byte-identical to app.py._kudlit_mark_features. app.py
+# reads this length back from the spatial scaler, so a 26- or 36-feature model
+# drops in unchanged.
+N_SPATIAL_FEATURES = 36
 
 
 def _hog_len(target_size):
@@ -198,10 +209,12 @@ KUDLIT_STRIP_RATIO = 0.22  # top / bottom band width, fraction of glyph height
 
 
 def kudlit_strip_features(binary):
-    """Fraction of ink in the top band vs the bottom band. o/u kudlit sits
-    below the body, e/i above, bare/-a has neither - and unlike the connected-
-    component features these still fire when the mark touches the glyph.
-    Appended last so a 26-feature model still slices cleanly (see app.py)."""
+    """RETIRED from the V7 feature vector (replaced by kudlit_mark_features).
+    Kept defined only so the standalone mark-corrector script and old
+    error-analysis notebooks that import it still run. Do NOT add it back to
+    extract_spatial_features without a matching edit in app.py.
+
+    Fraction of ink in the top band vs the bottom band."""
     h = binary.shape[0]
     strip = max(1, int(round(h * KUDLIT_STRIP_RATIO)))
     total = float(binary.sum()) or 1.0
@@ -213,11 +226,12 @@ KUDLIT_SHAPE_BAND = 0.16  # top / bottom band, fraction of glyph height
 
 
 def kudlit_shape_features(binary):
-    """Shape of the mark in the top / bottom band: [top_aspect, top_relwidth,
-    bot_aspect, bot_relwidth]. A dash kudlit is wide + flat (aspect > ~2, wide
-    share of the glyph); a dot is compact (aspect ~1). Separates Ne/Ni and
-    Nu/No, which the density / position features cannot. Appended last (see
-    app.py._kudlit_shape_features - keep identical)."""
+    """RETIRED from the V7 feature vector (replaced by kudlit_mark_features).
+    Kept defined for the mark-corrector script / old notebooks only.
+
+    Shape of the mark in a fixed top / bottom band: [top_aspect, top_relwidth,
+    bot_aspect, bot_relwidth]. The fixed band could not tell a mark from a
+    descender tail, which is why kudlit_mark_features supersedes it."""
     h, w = binary.shape
     band = max(1, int(round(h * KUDLIT_SHAPE_BAND)))
     cols_all = np.where(binary.sum(axis=0) > 0)[0]
@@ -235,16 +249,69 @@ def kudlit_shape_features(binary):
     return strip_shape(binary[:band]) + strip_shape(binary[h - band:])
 
 
+def kudlit_mark_features(binary):
+    """AUDIT #13-15: 10 numbers describing the diacritic ABOVE the body and the
+    one BELOW it, each as [present, width/body_width, aspect w/h, solidity,
+    area/body_area].
+
+      dot   (o, i) -> low width, aspect ~1,   high solidity (~0.8), small area
+      dash  (e, u) -> higher width, aspect > ~1.6, medium solidity
+      virama x     -> low solidity (~0.35 - crossing strokes leave gaps)
+      none / -a    -> present = 0
+
+    The mark is taken from a *detached satellite component* on that side of the
+    body's centroid, or - if it touches the body - from ink lying strictly
+    beyond the body's bounding box. Either way a descender / body tail is NOT
+    counted (it is part of the body component and inside the body bbox), which
+    is what the old fraction-of-total strip feature could not do.
+
+    KEEP BYTE-IDENTICAL to app.py._kudlit_mark_features.
+    """
+    h, w = binary.shape
+    reg = regionprops(sk_label(binary > 0))
+    if not reg:
+        return [0.0] * 10
+    body = max(reg, key=lambda r: r.area)
+    body_cy = float(body.centroid[0])
+    by0, _bx0, by1, bx1 = body.bbox
+    body_w = max(1.0, float(bx1 - _bx0))
+    body_area = max(1.0, float(body.area))
+
+    def side(above):
+        sats = [r for r in reg if r is not body and r.area < 0.45 * body.area
+                and ((r.centroid[0] < body_cy) if above else (r.centroid[0] > body_cy))]
+        if sats:
+            m = max(sats, key=lambda r: r.area)
+            r0, c0, r1, c1 = m.bbox
+            mw, mh, ar = float(c1 - c0), float(r1 - r0), float(m.area)
+        else:
+            band = binary[:max(1, by0)] if above else binary[min(h - 1, by1):]
+            ys, xs = np.where(band > 0)
+            if xs.size < 3:
+                return [0.0, 0.0, 0.0, 0.0, 0.0]
+            mw = float(xs.max() - xs.min() + 1)
+            mh = float(ys.max() - ys.min() + 1)
+            ar = float((band > 0).sum())
+        return [1.0,
+                min(2.0, mw / body_w),
+                min(6.0, mw / max(1.0, mh)),
+                min(1.0, ar / max(1.0, mw * mh)),
+                min(1.0, ar / body_area)]
+
+    return side(above=True) + side(above=False)
+
+
 def extract_spatial_features(pre_img):
+    """overall density(1) + 2x2 grid(4) + 4x4 grid(16) + kudlit component
+    stats(5) + body-isolated kudlit MARK descriptor(10) = 36.
+    KEEP identical to app.py._extract_spatial_features."""
     _, binary = cv2.threshold(pre_img, 127, 255, cv2.THRESH_BINARY)
     overall_density = [binary.sum() / (binary.size * 255)]
     quadrant = grid_density_features(binary, grid_size=2)
     fine_grid = grid_density_features(binary, grid_size=4)
     kudlit_feats = kudlit_component_features(binary)
-    strip_feats = kudlit_strip_features(binary)
-    shape_feats = kudlit_shape_features(binary)
-    return (overall_density + quadrant + fine_grid + kudlit_feats
-            + strip_feats + shape_feats)
+    mark_feats = kudlit_mark_features(binary)
+    return (overall_density + quadrant + fine_grid + kudlit_feats + mark_feats)
 
 
 def extract_combined_features(pre_img):
@@ -314,6 +381,27 @@ def augment_kudlit(pre_img, rng):
     return out
 
 
+def thicken_once(pre_img, rng):
+    """PEN/MARKER ALIGNMENT (audit #3). When the user picks 'pen', app.py runs
+    _thicken_ink on the source photo - a 2x2 grayscale erode that grows the dark
+    ink ~1 px - so a ballpen glyph that reaches the model is a touch heavier
+    than the marker glyphs it trained on, and the kudlit dot in particular
+    swells. --pen-aug adds thickened copies (ink is white at this stage, so
+    dilate) to put that weight in-distribution. Kernel + iterations match
+    app.py's STROKE_THICKEN_ITERS. Only a tiny affine jitter: the mark stays
+    put."""
+    h, w = pre_img.shape
+    out = cv2.dilate(pre_img, np.ones((2, 2), np.uint8), iterations=1)
+    if rng.integers(0, 2):
+        angle = rng.uniform(-3, 3)
+        m = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        m[0, 2] += rng.integers(-2, 3)
+        m[1, 2] += rng.integers(-2, 3)
+        out = cv2.warpAffine(out, m, (w, h), flags=cv2.INTER_AREA,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return out
+
+
 # ============================================================================
 # DATASET
 # ============================================================================
@@ -348,7 +436,7 @@ def discover(root, limit_per_class=None):
     return items, class_counts
 
 
-def _process_one(path, label, n_aug, kudlit_aug, seed):
+def _process_one(path, label, n_aug, kudlit_aug, pen_aug, seed):
     warnings.filterwarnings("ignore")  # also silence inside joblib worker processes
     gray = load_grayscale(path)
     pre = preprocess_image(gray)
@@ -356,7 +444,7 @@ def _process_one(path, label, n_aug, kudlit_aug, seed):
         return []
     rows = [(extract_combined_features(pre), label, str(path))]
     k_aug = kudlit_aug if (kudlit_aug and has_kudlit(label)) else 0
-    if n_aug or k_aug:
+    if n_aug or k_aug or pen_aug:
         rng = np.random.default_rng(abs(hash((str(path), seed))) % (2**32))
         for k in range(n_aug):
             rows.append((extract_combined_features(augment_once(pre, rng)),
@@ -364,13 +452,17 @@ def _process_one(path, label, n_aug, kudlit_aug, seed):
         for k in range(k_aug):
             rows.append((extract_combined_features(augment_kudlit(pre, rng)),
                          label, f"{path}#kaug{k}"))
+        for k in range(pen_aug):
+            rows.append((extract_combined_features(thicken_once(pre, rng)),
+                         label, f"{path}#paug{k}"))
     return rows
 
 
-def build_matrix(items, n_aug, kudlit_aug, seed, n_jobs):
+def build_matrix(items, n_aug, kudlit_aug, pen_aug, seed, n_jobs):
     t0 = time.time()
     batches = joblib.Parallel(n_jobs=n_jobs, verbose=5)(
-        joblib.delayed(_process_one)(p, lab, n_aug, kudlit_aug, seed) for p, lab in items
+        joblib.delayed(_process_one)(p, lab, n_aug, kudlit_aug, pen_aug, seed)
+        for p, lab in items
     )
     feats, labels, paths = [], [], []
     for b in batches:
@@ -382,11 +474,12 @@ def build_matrix(items, n_aug, kudlit_aug, seed, n_jobs):
     y = np.asarray(labels)
     paths = np.asarray(paths)
     assert X.shape[1] == N_FEATURES, f"feature length {X.shape[1]} != {N_FEATURES}"
+    n_ok = sum(1 for b in batches if b)
     print(f"built X={X.shape} in {time.time()-t0:.0f}s "
           f"({len(items)} source images, +{n_aug}/img global aug, "
-          f"+{kudlit_aug}/img kudlit-class aug, "
-          f"{X.shape[0]-sum(1 for b in batches if b)} augmented rows added, "
-          f"{len(items)-sum(1 for b in batches if b)} unreadable/blank)")
+          f"+{kudlit_aug}/img kudlit-class aug, +{pen_aug}/img pen-thicken aug, "
+          f"{X.shape[0]-n_ok} augmented rows added, "
+          f"{len(items)-n_ok} unreadable/blank)")
     return X, y, paths
 
 
@@ -449,16 +542,17 @@ def sha256(path):
     return h.hexdigest()
 
 
-def run(data, out, augment=0, kudlit_augment=0, C=SVC_C_DEFAULT, search_c="",
-        weight_grid="", fixed_weight=0, limit_per_class=0, n_jobs=-1,
+def run(data, out, augment=0, kudlit_augment=0, pen_aug=0, C=SVC_C_DEFAULT,
+        search_c="", weight_grid="", fixed_weight=0, limit_per_class=0, n_jobs=-1,
         target_size=64):
     """Notebook entry point - call this instead of using the CLI, e.g.:
         run(data="/content/drive/MyDrive/ALL_DATASET",
-            out="/content/drive/MyDrive/WEIGHTED_MODEL_V6",
-            kudlit_augment=3)          # sanity check: mark-class augment only
+            out="/content/drive/MyDrive/WEIGHTED_MODEL_V7",
+            kudlit_augment=3,          # mark lands in more positions/sizes
+            pen_aug=1)                 # 1 pen-weight copy per glyph (audit #3)
     """
     argv = ["--data", str(data), "--out", str(out), "--augment", str(augment),
-            "--kudlit-augment", str(kudlit_augment),
+            "--kudlit-augment", str(kudlit_augment), "--pen-aug", str(pen_aug),
             "--C", str(C), "--n-jobs", str(n_jobs), "--target-size", str(target_size)]
     if search_c:
         argv += ["--search-c", str(search_c)]
@@ -484,6 +578,11 @@ def main(argv=None):
                          "(bare consonant + e/i/o/u forms): wider affine so the "
                          "kudlit varies in position/size. Sanity check for "
                          "whether mark data - not architecture - is the fix.")
+    ap.add_argument("--pen-aug", type=int, default=0,
+                    help="pen/marker alignment (audit #3): thickened copies per "
+                         "image (2x2 dilate, matches app.py _thicken_ink) so "
+                         "pen_type='pen' inference is in-distribution. 1 is "
+                         "enough; costs ~1x extra training time.")
     ap.add_argument("--C", type=float, default=SVC_C_DEFAULT)
     ap.add_argument("--search-c", default="", help="comma list, e.g. 10,20,50,100")
     ap.add_argument("--weight-grid", default="",
@@ -520,7 +619,7 @@ def main(argv=None):
               f"(kudlit variants are a common culprit): {weak}")
 
     # ---- 2. features ----
-    X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, 0, SEED, args.n_jobs)
+    X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, 0, 0, SEED, args.n_jobs)
 
     le = LabelEncoder().fit(sorted(class_counts))
     y_all = le.transform(y_all_str)
@@ -534,10 +633,11 @@ def main(argv=None):
     print(f"split: train {len(idx_tr)}  val {len(idx_va)}  test {len(idx_te)}")
 
     # augment TRAIN only
-    if args.augment or args.kudlit_augment:
+    if args.augment or args.kudlit_augment or args.pen_aug:
         train_items = [items[i] for i in idx_tr]
         Xtr, ytr_str, ptr = build_matrix(
-            train_items, args.augment, args.kudlit_augment, SEED, args.n_jobs)
+            train_items, args.augment, args.kudlit_augment, args.pen_aug,
+            SEED, args.n_jobs)
         ytr = le.transform(ytr_str)
     else:
         Xtr, ytr, ptr = X_all_noaug[idx_tr], y_all[idx_tr], paths_all[idx_tr]
@@ -645,6 +745,7 @@ def main(argv=None):
         "source_images": len(items),
         "augment_per_image": args.augment,
         "kudlit_augment": args.kudlit_augment,
+        "pen_aug": args.pen_aug,
         "train/val/test": [int(len(ytr)), int(len(yva)), int(len(yte))],
         "svc": {"C": C, "gamma": SVC_GAMMA, "class_weight": "balanced",
                 "n_support_vectors": int(model.support_vectors_.shape[0])},
@@ -678,14 +779,16 @@ def main(argv=None):
         f"DAYAW weighted Baybayin model - trained {metrics['trained_at']}\n"
         f"Test accuracy: {acc:.4f}  (calibrated {acc_cal:.4f})\n"
         f"{n_classes} classes, {len(items)} source images, "
-        f"augment x{args.augment}, kudlit-augment x{args.kudlit_augment}\n\n"
+        f"augment x{args.augment}, kudlit-augment x{args.kudlit_augment}, "
+        f"pen-aug x{args.pen_aug}\n\n"
         f"Pipeline (must match backend/app.py):\n"
         f"  preprocess: grayscale -> Otsu invert -> remove_small_objects(min_size={MIN_NOISE_SIZE})\n"
         f"    -> tight crop -> pad square (ratio {PAD_RATIO}) -> resize {TARGET_SIZE}x{TARGET_SIZE}\n"
+        f"    (app.py auto-uses min_size {MIN_NOISE_SIZE} for a {N_SPATIAL_FEATURES}-feature spatial scaler)\n"
         f"  HOG: orientations={HOG_ORIENTATIONS} ppc={HOG_PIXELS_PER_CELL} "
         f"cpb={HOG_CELLS_PER_BLOCK} block_norm={HOG_BLOCK_NORM} -> {N_HOG_FEATURES}\n"
         f"  spatial: overall density(1) + 2x2 grid(4) + 4x4 grid(16) + kudlit stats(5) "
-        f"+ top/bottom strip(2) + kudlit mark shape(4) -> {N_SPATIAL_FEATURES}\n"
+        f"+ body-isolated kudlit mark descriptor above+below(10) -> {N_SPATIAL_FEATURES}\n"
         f"  scale HOG block with hog_scaler; scale spatial block with spatial_scaler "
         f"then x {weight}; concat -> {N_FEATURES}\n"
         f"  SVC(C={C}, gamma='{SVC_GAMMA}', class_weight='balanced'); "
@@ -700,8 +803,9 @@ def main(argv=None):
     print(f"  cp {out}/test_{{predictions,true_labels,confusion_matrix}}.npy   "
           f"dayawanalisa/backend/tests/reports/")
     print("  cd dayawanalisa/backend && python tests/generate_model_report.py")
-    print(f"  (default CONFIG unchanged -> no app.py edits needed; spatial weight "
-          f"{weight} is read from best_weight.pkl)")
+    print(f"  (no app.py edits needed: it reads spatial weight {weight} from "
+          f"best_weight.pkl, and auto-switches to the {N_SPATIAL_FEATURES}-feature "
+          f"mark pipeline + min_noise {MIN_NOISE_SIZE} from the spatial scaler)")
 
 
 def _running_in_notebook():
