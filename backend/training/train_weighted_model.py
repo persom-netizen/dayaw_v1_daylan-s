@@ -138,6 +138,27 @@ IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 # byte-identical port of these (verified: reproduces test_predictions.npy on
 # all 4560 old test samples). DO NOT edit one without the others.
 # ============================================================================
+DESPECKLE_BAND = 0.22       # top / bottom fraction of the glyph = mark zone
+DESPECKLE_BAND_FLOOR = 3    # px^2; below this a band blob is still noise, drop it
+
+
+def despeckle_bands(binary_bool, min_noise_size):
+    """remove_small_objects that KEEPS a sub-threshold blob in the top/bottom
+    DESPECKLE_BAND (down to DESPECKLE_BAND_FLOOR px) - the kudlit / virama zone,
+    where min_size 8 still erased faint dots (audit #1/#2). Byte-identical to
+    app.py._despeckle(protect_bands=True)."""
+    big = remove_small_objects(binary_bool, min_size=min_noise_size)
+    h = binary_bool.shape[0]
+    lab = sk_label(binary_bool)
+    for r in regionprops(lab):
+        if r.area >= min_noise_size or r.area < DESPECKLE_BAND_FLOOR:
+            continue
+        cy = r.centroid[0] / h
+        if cy <= DESPECKLE_BAND or cy >= 1.0 - DESPECKLE_BAND:
+            big[lab == r.label] = True
+    return big
+
+
 def preprocess_image(gray, target_size=None, min_noise_size=MIN_NOISE_SIZE,
                      pad_ratio=PAD_RATIO):
     if target_size is None:
@@ -146,8 +167,7 @@ def preprocess_image(gray, target_size=None, min_noise_size=MIN_NOISE_SIZE,
         return None
 
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    binary_bool = binary > 0
-    cleaned_bool = remove_small_objects(binary_bool, min_size=min_noise_size)
+    cleaned_bool = despeckle_bands(binary > 0, min_noise_size)
     cleaned = (cleaned_bool * 255).astype(np.uint8)
     if cleaned.sum() == 0:
         return None

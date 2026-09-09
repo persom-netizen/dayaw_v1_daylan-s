@@ -689,12 +689,39 @@ HOG_CELLS_PER_BLOCK = (2, 2)
 HOG_BLOCK_NORM = 'L2-Hys'
 
 
-def _despeckle(binary, min_noise_size):
+# AUDIT #1/#2: the V7 "mark" pipeline (36-feature spatial scaler) protects small
+# blobs in the top/bottom band from despeckle - that is the kudlit / virama zone
+# and min_size 8 was still erasing faint dots there. DESPECKLE_BAND_FLOOR still
+# kills single-pixel sensor noise. Off for V1-V6 (byte-identical old behaviour).
+MARK_PIPELINE = SPATIAL_FEATURE_LEN >= 36
+DESPECKLE_BAND = 0.22       # top / bottom fraction of the patch = mark zone
+DESPECKLE_BAND_FLOOR = 3    # px^2; below this a band blob is still noise, drop it
+
+
+def _despeckle(binary, min_noise_size, protect_bands=None):
     """remove_small_objects, but a no-op when min_noise_size <= 0 (white-paper
-    mode keeps every ink blob so a thin-pen kudlit dot is never erased)."""
+    mode keeps every ink blob so a thin-pen kudlit dot is never erased).
+
+    protect_bands (default: MARK_PIPELINE) keeps a sub-threshold blob whose
+    centroid sits in the top or bottom DESPECKLE_BAND, down to
+    DESPECKLE_BAND_FLOOR px - so a faint kudlit dot / broken virama stroke is
+    not wiped along with the speckle, and _tight_box_from_gray then includes it
+    in the crop instead of tightening around the body alone (audit #1/#2)."""
     if not min_noise_size or min_noise_size <= 0:
         return binary
-    return (remove_small_objects(binary > 0, min_size=min_noise_size) * 255).astype(np.uint8)
+    if protect_bands is None:
+        protect_bands = MARK_PIPELINE
+    big = remove_small_objects(binary > 0, min_size=min_noise_size)
+    if protect_bands:
+        h = binary.shape[0]
+        lab = sk_label(binary > 0)
+        for r in regionprops(lab):
+            if r.area >= min_noise_size or r.area < DESPECKLE_BAND_FLOOR:
+                continue
+            cy = r.centroid[0] / h
+            if cy <= DESPECKLE_BAND or cy >= 1.0 - DESPECKLE_BAND:
+                big[lab == r.label] = True
+    return (big * 255).astype(np.uint8)
 
 
 def _tight_box_from_gray(gray_patch, min_noise_size=MIN_NOISE_SIZE):
