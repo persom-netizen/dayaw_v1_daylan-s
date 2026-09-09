@@ -61,8 +61,14 @@ drive.mount('/content/drive')
 # scalers, no code edit on install.
 run(data="/content/drive/MyDrive/ALL_DATASET",
     out="/content/drive/MyDrive/WEIGHTED_MODEL_V7",
-    kudlit_augment=3,   # mark-bearing classes get a wider affine
+    kudlit_augment=2,   # mark-bearing classes get a wider affine (~80k train rows)
     pen_aug=1)          # 1 pen-weight (2x2 dilate) copy per glyph
+
+# kudlit_augment=3 (~106k rows) OOM-killed Colab's SVC fit before the float32 +
+# free-as-you-go memory changes; try it only if =2 succeeds and you want more.
+# The no-aug feature matrix is cached to out/X.npy on the first pass, so a
+# re-run after a crash in a later stage skips the ~80-min extraction. rm it to
+# force a rebuild.
 
 # baseline / regression compare (old 26-feature vector - keep for A/B):
 # run(data="/content/drive/MyDrive/ALL_DATASET",

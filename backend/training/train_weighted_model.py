@@ -26,14 +26,17 @@ QUICK START - see backend/training/README.md for the full Colab cells.
 
   CLI:
     python train_weighted_model.py --data ALL_DATASET --out WEIGHTED_MODEL_V7 \
-        --kudlit-augment 3 --pen-aug 1
+        --kudlit-augment 2 --pen-aug 1
 
   Notebook (paste this whole file into a cell, then in the NEXT cell):
     run(data="/content/drive/MyDrive/ALL_DATASET",
         out="/content/drive/MyDrive/WEIGHTED_MODEL_V7",
-        kudlit_augment=3,   # mark lands in more positions/sizes
+        kudlit_augment=2,   # mark lands in more positions/sizes (~80k train rows)
         pen_aug=1)          # 1 pen-weight (2x2 dilate) copy per glyph
     # optional: augment=2, weight_grid="2,4,6,8,10,12,15,20,25", search_c="10,20,50"
+    # kudlit_augment=3 (~106k rows) OOM-killed Colab before the float32/free-as-
+    # you-go memory fixes; try it only if =2 succeeds. out/X.npy caches the slow
+    # no-aug feature pass, so a re-run after a later crash is cheap.
 
 --------------------------------------------------------------------------------
 OUTPUTS (in --out):
@@ -56,6 +59,7 @@ OUTPUTS (in --out):
 """
 
 import argparse
+import gc
 import hashlib
 import json
 import sys
@@ -490,11 +494,16 @@ def build_matrix(items, n_aug, kudlit_aug, pen_aug, seed, n_jobs):
             feats.append(f)
             labels.append(lab)
             paths.append(pth)
-    X = np.asarray(feats, dtype=np.float64)
+    n_ok = sum(1 for b in batches if b)
+    batches = None                          # ~1x X worth of tuples, free it now
+    # float32 halves every persistent feature matrix (X_all_noaug, Xtr, the
+    # split .npy). StandardScaler / SVC upcast their own working copy to float64,
+    # so accuracy is unchanged but Colab RAM at the final fit drops by ~2 GB.
+    X = np.asarray(feats, dtype=np.float32)
+    feats = None
     y = np.asarray(labels)
     paths = np.asarray(paths)
     assert X.shape[1] == N_FEATURES, f"feature length {X.shape[1]} != {N_FEATURES}"
-    n_ok = sum(1 for b in batches if b)
     print(f"built X={X.shape} in {time.time()-t0:.0f}s "
           f"({len(items)} source images, +{n_aug}/img global aug, "
           f"+{kudlit_aug}/img kudlit-class aug, +{pen_aug}/img pen-thicken aug, "
@@ -507,9 +516,14 @@ def build_matrix(items, n_aug, kudlit_aug, pen_aug, seed, n_jobs):
 # SCALING + SEARCH + TRAIN
 # ============================================================================
 def scale_blocks(X, hog_scaler, spatial_scaler, weight):
-    hog_block = hog_scaler.transform(X[:, :N_HOG_FEATURES])
-    spatial_block = spatial_scaler.transform(X[:, N_HOG_FEATURES:]) * weight
-    return np.hstack([hog_block, spatial_block])
+    # keep the result float32 - libsvm makes its own float64 copy at fit time,
+    # no need to also hold a float64 version of the whole scaled matrix here.
+    hog_block = hog_scaler.transform(X[:, :N_HOG_FEATURES]).astype(np.float32, copy=False)
+    spatial_block = (spatial_scaler.transform(X[:, N_HOG_FEATURES:]) * weight
+                     ).astype(np.float32, copy=False)
+    out = np.hstack([hog_block, spatial_block])
+    del hog_block, spatial_block
+    return out
 
 
 def stratified_subsample(X, y, n, seed):
@@ -568,8 +582,15 @@ def run(data, out, augment=0, kudlit_augment=0, pen_aug=0, C=SVC_C_DEFAULT,
     """Notebook entry point - call this instead of using the CLI, e.g.:
         run(data="/content/drive/MyDrive/ALL_DATASET",
             out="/content/drive/MyDrive/WEIGHTED_MODEL_V7",
-            kudlit_augment=3,          # mark lands in more positions/sizes
+            kudlit_augment=2,          # mark lands in more positions/sizes
             pen_aug=1)                 # 1 pen-weight copy per glyph (audit #3)
+
+    RAM: kudlit_augment=2 + pen_aug=1 -> ~80k train rows, which fits Colab's
+    ~12.7 GB with the float32 + free-as-you-go changes below. kudlit_augment=3
+    (~106k rows) OOM-killed the fit before those changes - try it only if =2
+    lands and you want more. The no-aug feature matrix is cached to out/X.npy on
+    the first pass, so a re-run after a later-stage crash skips the slow (~80
+    min) extraction; delete out/X.npy to force a rebuild.
     """
     argv = ["--data", str(data), "--out", str(out), "--augment", str(augment),
             "--kudlit-augment", str(kudlit_augment), "--pen-aug", str(pen_aug),
@@ -639,10 +660,35 @@ def main(argv=None):
               f"(kudlit variants are a common culprit): {weak}")
 
     # ---- 2. features ----
-    X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, 0, 0, SEED, args.n_jobs)
-
-    le = LabelEncoder().fit(sorted(class_counts))
-    y_all = le.transform(y_all_str)
+    # The no-aug pass is the slow one (cold Drive reads - ~80 min the first time).
+    # Cache it: a re-run after an OOM in a later stage reloads X.npy instead of
+    # re-extracting. Delete out/X.npy to force a rebuild.
+    cache_x, cache_y, cache_p = out / "X.npy", out / "y.npy", out / "filepaths.npy"
+    cached = None
+    if cache_x.exists() and cache_y.exists() and cache_p.exists():
+        try:
+            Xc = np.load(cache_x)
+            if Xc.shape[1] == N_FEATURES:
+                X_all_noaug = Xc.astype(np.float32, copy=False)
+                y_all = np.load(cache_y)
+                paths_all = np.load(cache_p, allow_pickle=True)
+                if len(y_all) == len(X_all_noaug) == len(paths_all):
+                    cached = X_all_noaug.shape
+            del Xc
+        except Exception as e:
+            print(f"  (cache load failed: {e!r}; rebuilding)")
+    if cached:
+        print(f"loaded cached no-aug features X={cached} from {cache_x}")
+        le = LabelEncoder().fit(sorted(class_counts))
+    else:
+        X_all_noaug, y_all_str, paths_all = build_matrix(items, 0, 0, 0, SEED, args.n_jobs)
+        le = LabelEncoder().fit(sorted(class_counts))
+        y_all = le.transform(y_all_str)
+        y_all_str = None
+        (out / "splits").mkdir(parents=True, exist_ok=True)
+        np.save(cache_x, X_all_noaug)          # save NOW so a later crash is cheap
+        np.save(cache_y, y_all)
+        np.save(cache_p, paths_all)
     print(f"label order: {list(le.classes_)}")
 
     # ---- 3. split (stratified, deterministic) ----
@@ -652,17 +698,24 @@ def main(argv=None):
     idx_tr, idx_va = train_test_split(idx_tr, test_size=val_rel, random_state=SEED, stratify=y_all[idx_tr])
     print(f"split: train {len(idx_tr)}  val {len(idx_va)}  test {len(idx_te)}")
 
+    # val / test never get augmented
+    Xva, yva, pva = X_all_noaug[idx_va].copy(), y_all[idx_va], paths_all[idx_va]
+    Xte, yte, pte = X_all_noaug[idx_te].copy(), y_all[idx_te], paths_all[idx_te]
+
     # augment TRAIN only
     if args.augment or args.kudlit_augment or args.pen_aug:
         train_items = [items[i] for i in idx_tr]
+        X_all_noaug = y_all = paths_all = None   # free ~0.25 GB before the aug pass
+        gc.collect()
         Xtr, ytr_str, ptr = build_matrix(
             train_items, args.augment, args.kudlit_augment, args.pen_aug,
             SEED, args.n_jobs)
         ytr = le.transform(ytr_str)
+        ytr_str = None
     else:
-        Xtr, ytr, ptr = X_all_noaug[idx_tr], y_all[idx_tr], paths_all[idx_tr]
-    Xva, yva, pva = X_all_noaug[idx_va], y_all[idx_va], paths_all[idx_va]
-    Xte, yte, pte = X_all_noaug[idx_te], y_all[idx_te], paths_all[idx_te]
+        Xtr, ytr, ptr = X_all_noaug[idx_tr].copy(), y_all[idx_tr], paths_all[idx_tr]
+        X_all_noaug = y_all = paths_all = None
+        gc.collect()
 
     # ---- 4. scalers (fit on TRAIN only) ----
     hog_scaler = StandardScaler().fit(Xtr[:, :N_HOG_FEATURES])
@@ -684,13 +737,23 @@ def main(argv=None):
                      [float(x) for x in args.search_c.split(",")], SEED)
 
     # ---- 7. final SVM on full train ----
+    # persist the train split BEFORE the fit, then drop the unscaled copy - at
+    # 60k+ augmented rows holding Xtr + Xtr_s + libsvm's own float64 copy + the
+    # kernel cache all at once is what OOM-kills Colab.
+    np.save(out / "splits" / "X_train.npy", Xtr)
+    np.save(out / "splits" / "y_train.npy", ytr)
+    np.save(out / "splits" / "paths_train.npy", ptr)
     print(f"\ntraining final SVC(C={C}, gamma='{SVC_GAMMA}', class_weight='balanced') "
           f"on {len(ytr)} samples ...")
     t0 = time.time()
     Xtr_s = scale_blocks(Xtr, hog_scaler, spatial_scaler, weight)
-    model = SVC(C=C, gamma=SVC_GAMMA, class_weight="balanced", cache_size=2000)
+    Xtr = None
+    gc.collect()
+    model = SVC(C=C, gamma=SVC_GAMMA, class_weight="balanced", cache_size=1000)
     model.fit(Xtr_s, ytr)
     print(f"  fit in {time.time()-t0:.0f}s, {model.support_vectors_.shape[0]} support vectors")
+    Xtr_s = None
+    gc.collect()
 
     # ---- 8. isotonic calibrator on val ----
     print("fitting isotonic CalibratedClassifierCV on the val split ...")
@@ -738,16 +801,12 @@ def main(argv=None):
     np.save(reports / "test_true_labels.npy", yte)
     np.save(reports / "test_confusion_matrix.npy", cm)
 
-    np.save(out / "X.npy", X_all_noaug)
-    np.save(out / "y.npy", y_all)
-    np.save(out / "filepaths.npy", paths_all)
-    np.save(out / "splits" / "X_train.npy", Xtr)
-    np.save(out / "splits" / "y_train.npy", ytr)
+    # X.npy / y.npy / filepaths.npy and splits/{X,y,paths}_train.npy were written
+    # earlier (feature cache + pre-fit) so a crash here doesn't lose the slow work.
     np.save(out / "splits" / "X_val.npy", Xva)
     np.save(out / "splits" / "y_val.npy", yva)
     np.save(out / "splits" / "X_test.npy", Xte)
     np.save(out / "splits" / "y_test.npy", yte)
-    np.save(out / "splits" / "paths_train.npy", ptr)
     np.save(out / "splits" / "paths_val.npy", pva)
     np.save(out / "splits" / "paths_test.npy", pte)
 
