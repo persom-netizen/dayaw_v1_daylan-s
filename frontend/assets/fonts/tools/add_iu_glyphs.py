@@ -1,7 +1,11 @@
 """Add two dedicated glyphs to baybayin_custom.ttf so the standalone vowels
 I and U are visually distinct from E and O:
 
-  uniE010  =  the I/E base glyph (uni1701)  +  a short vertical line, CENTRED ABOVE
+  uniE010  =  the I/E base glyph (uni1701)  +  a vertical line CENTRED ABOVE that
+             OVERLAPS the top of the base curve (bottom at y=470, into the
+             stroke whose top sits ~y=537 near centre) so it rasterises as one
+             connected shape - a detached tick was read back as E by the BTL
+             classifier / dropped as a stray mark.
   uniE011  =  the U/O base glyph (uni1702)  +  a short vertical tick BOTTOM-RIGHT
              (enlarged to 50 x 300 font units after field feedback)
 
@@ -53,9 +57,11 @@ def add_stroke(src_name, new_name, cp, rect, advance):
             t.cmap[cp] = new_name
 
 
-# I : vertical line centred above (base uni1701 x[32,978] y[78,579] adv 1011)
+# I : vertical bar centred above, FUSED into the base curve so the raster is
+# connected (base uni1701 x[32,978] y[78,579] adv 1011; centre x~505, base
+# stroke near centre tops out ~y=537). Bar x[485,525] y[470,835].
 add_stroke("uni1701", "uniE010", 0xE010,
-           rect=[(492, 615), (492, 835), (520, 835), (520, 615)], advance=1011)
+           rect=[(485, 470), (485, 835), (525, 835), (525, 470)], advance=1011)
 
 # U : vertical tick bottom-right, 50 x 300 (base uni1702 x[48,487] y[0,634] adv 535)
 add_stroke("uni1702", "uniE011", 0xE011,

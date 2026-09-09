@@ -32,7 +32,11 @@ class _TagalogToBaybayinViewState extends State<TagalogToBaybayinView> {
   static const double _glyphSize = 18.0;
   static const double _charGap = 1.5; // spacing between glyphs within a word
   static const double _wordGap = 24.0; // clear gap between words
-  static const double _lineHeight = 1.35;
+  // Baybayin glyphs carry marks well above the body (the standalone-I tick
+  // reaches ~0.84 em) and descenders below (~-0.24 em), so a line spans ~1.1 em.
+  // 2.0 keeps a clear band between lines - at 1.35 the marks of adjacent lines
+  // touched (see field screenshot).
+  static const double _lineHeight = 2.0;
 
   Timer? _debounce;
 

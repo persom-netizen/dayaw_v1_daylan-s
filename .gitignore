@@ -13,3 +13,6 @@ backend/*.sav
 # Runtime working dirs
 backend/temp_crops/
 backend/open_archival_dataset/
+
+# font build backups (add_iu_glyphs.py / tune_diacritics.py)
+*.ttf.bak
