@@ -78,6 +78,19 @@ DERIVED_TARGET_SIZE = _cells * 8  # 1764 -> 64, 4356 -> 96
 # decision_function, which is poorly calibrated (see calibrate_model.py docstring).
 calibrated_model = load_joblib_artifact('weighted_svm_calibrated.pkl')
 
+# The calibrator is fit with cv='prefit', so it *wraps* the already-fitted SVC -
+# `calibrated_model.estimator` IS the same object as weighted_svm.pkl. When only
+# the calibrated file is shipped (V7's SVC pickle is ~900 MB - no point keeping
+# two copies of 60k support vectors in RAM), reuse that inner estimator for the
+# raw decision_function paths (_score_gray_crop, the uncalibrated fallback).
+if model is None and calibrated_model is not None:
+    model = (getattr(calibrated_model, 'estimator', None)
+             or getattr(calibrated_model, 'base_estimator', None)
+             or getattr(calibrated_model, 'estimator_', None))
+    if model is not None:
+        print("ℹ️  weighted_svm.pkl not found; using the SVC inside "
+              "weighted_svm_calibrated.pkl (cv='prefit' wrapper).")
+
 # --- Path A: 6-class kudlit/virama "mark corrector" (optional) -----------------
 # A small separate SVM (train_mark_corrector.py) that reads ONLY the mark region.
 # It never touches the monolith's BASE letter - it only proposes a different
