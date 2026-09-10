@@ -88,7 +88,7 @@ if model is None and calibrated_model is not None:
              or getattr(calibrated_model, 'base_estimator', None)
              or getattr(calibrated_model, 'estimator_', None))
     if model is not None:
-        print("ℹ️  weighted_svm.pkl not found; using the SVC inside "
+        print("[info] weighted_svm.pkl not found; using the SVC inside "
               "weighted_svm_calibrated.pkl (cv='prefit' wrapper).")
 
 # --- Path A: 6-class kudlit/virama "mark corrector" (optional) -----------------
