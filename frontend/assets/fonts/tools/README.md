@@ -8,13 +8,15 @@ rebuilt from the base if it is ever lost. They need `fonttools`
 Run them **in order**, from anywhere:
 
 ```
-python add_iu_glyphs.py       # 370 -> 372 glyphs
-python tune_diacritics.py     # 372 -> 382 glyphs
+python add_iu_glyphs.py         # 370 -> 372 glyphs
+python tune_diacritics.py       # 372 -> 382 glyphs
+python center_below_kudlit.py   # shifts the below marks +107 in x
 ```
 
-Both are idempotent — each keeps a one-time pristine snapshot next to the font
-(`*.bak`, `*.prediac`) and rebuilds its glyphs from that, so re-running never
-stacks contours. Delete the snapshot files before committing the font.
+All three are idempotent — each keeps a one-time pristine snapshot next to the
+font (`*.bak`, `*.prediac`, `*.premarkx`) and rebuilds its glyphs from that, so
+re-running never stacks contours. Delete the snapshot files before committing
+the font.
 
 ## What each script does
 
@@ -42,6 +44,14 @@ as e/o):
 other base keeps the enlarged shared marks. Tune the gaps via `GAP_HA`,
 `GAP_NA_ABOVE`, `GAP_NA_BELOW`, `NA_VIRAMA_DX` and the `ENLARGE` table at the
 top of the script.
+
+### `center_below_kudlit.py`
+The below marks (dot **o** U+1713, dash **u** U+1716, virama U+1714 and their
+ha/na PUA variants) were drawn ~107 units left of where a typical consonant's
+ink centre falls, so "ko" / "go" / "do" rendered with the dot pushed left.
+Shifts every below mark right by `DX` (default 107 — puts the o-dot dead centre
+under Ka). Above marks untouched; BTL is unaffected (the V7 mark descriptor
+ignores horizontal offset). Run after `tune_diacritics.py`.
 
 ### `render_sample.py`
 `python render_sample.py <font.ttf> <out.png>` — draws base+mark combinations

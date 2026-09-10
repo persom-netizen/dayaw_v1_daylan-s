@@ -14,5 +14,7 @@ backend/*.sav
 backend/temp_crops/
 backend/open_archival_dataset/
 
-# font build backups (add_iu_glyphs.py / tune_diacritics.py)
+# font build backups (add_iu_glyphs.py / tune_diacritics.py / center_below_kudlit.py)
 *.ttf.bak
+*.prediac
+*.premarkx
